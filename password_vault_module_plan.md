@@ -1,88 +1,120 @@
-# Kế hoạch module — Local Password Vault
+# Kế hoạch module — Local Autofill Credential Store (Plaintext)
 
-## 1. Mục tiêu và phạm vi
-
-Hệ thống là password vault chạy local trên máy tính, dùng **MariaDB** làm nơi lưu trữ bền vững và một desktop agent/API local để quản lý credential cũng như hỗ trợ autofill.
-
-### Mục tiêu chính
-
-- Lưu username ở plaintext theo yêu cầu để list/search nhanh.
-- Mã hóa password, TOTP secret và notes trước khi ghi xuống MariaDB.
-- Không lưu master password hoặc khóa AES vào database/file cấu hình.
-- Chỉ giữ khóa session đã derive trong RAM khi vault đang unlock.
-- Tách lớp DB, crypto, business logic và autofill để dễ test/thay thế.
-- Cho phép app desktop, browser extension hoặc automation agent cùng gọi chung logic vault.
-
-### Ngoài phạm vi phiên bản đầu
-
-- Đồng bộ nhiều thiết bị qua Internet.
-- Chia sẻ vault cho nhiều user.
-- Recovery master password. Nếu quên master password thì dữ liệu mã hóa không thể khôi phục.
-- Tự động inject password không cần thao tác/xác nhận của người dùng.
+> **Phạm vi thiết kế:** Hệ thống này lưu username và password ở dạng plaintext trong MariaDB để phục vụ autofill và quản lý credential cục bộ trên một máy.
+>
+> **Cảnh báo:** Không có lớp mã hóa ở application/database. Bất kỳ ai, process nào hoặc backup nào có quyền đọc database đều có thể đọc trực tiếp toàn bộ username/password. Thiết kế này chỉ phù hợp dữ liệu test, tài khoản automation không quan trọng, hoặc môi trường local được kiểm soát nghiêm ngặt. Không dùng cho ngân hàng, email chính, ví tiền số, production secrets, API key quan trọng hoặc dữ liệu cá nhân nhạy cảm.
 
 ---
 
-## 2. Kiến trúc tổng thể
+## 1. Mục tiêu và phạm vi
+
+Hệ thống là credential store local chạy trên máy tính, dùng **MariaDB** để lưu và tra cứu nhanh thông tin đăng nhập cho desktop autofill agent, browser extension hoặc automation script.
+
+### Mục tiêu chính
+
+- Lưu `username` và `password` nguyên văn (plaintext) để thao tác autofill nhanh.
+- Lưu thông tin nền tảng, URL/domain, executable/window title và rule autofill.
+- Hỗ trợ CRUD credential, tìm kiếm theo title/username/platform/tag.
+- Hỗ trợ password history nếu bạn muốn rollback password cũ.
+- Tách rõ tầng truy cập database, repository, service và adapter autofill.
+- Không có `crypto.py`, master password, vault unlock/lock, session key, KDF hay nonce.
+
+### Ngoài phạm vi
+
+- Mã hóa password trong DB hoặc trên đường truyền.
+- Master password và cơ chế unlock vault.
+- Đồng bộ Internet/multi-device.
+- Multi-user và chia sẻ credential.
+- Recovery, access control phức tạp, audit compliance.
+
+---
+
+## 2. Rủi ro và giới hạn
+
+Vì password lưu plaintext, các tình huống sau làm lộ toàn bộ credential:
+
+- Người khác đăng nhập được vào MariaDB bằng user có quyền đọc bảng.
+- Malware hoặc process chạy cùng user đọc `.env`, source code, dump/backup DB hoặc gọi local API.
+- Bạn export database, copy volume Docker hoặc backup sang cloud/USB không bảo vệ.
+- Máy bị mất, bị remote-control, hoặc bị truy cập bởi người có quyền admin/root.
+- Endpoint API local bị bind sai sang LAN/Internet hoặc không có token xác thực.
+
+### Biện pháp tối thiểu vẫn nên có
+
+- MariaDB bind `127.0.0.1` nếu không cần máy khác truy cập.
+- Dùng user MariaDB riêng, quyền tối thiểu; không dùng `root` trong app.
+- `.env` phải nằm trong `.gitignore`; không commit password DB.
+- Docker volume/database dump/backup phải được bảo vệ bởi quyền file/ổ đĩa mã hóa (BitLocker/LUKS) nếu có dữ liệu thật.
+- API local chỉ bind `127.0.0.1` và dùng local token ngẫu nhiên theo phiên.
+- Không log password hoặc request body chứa password.
+- Chỉ autofill sau hotkey hoặc hành động rõ ràng của user, không tự động điền âm thầm.
+
+---
+
+## 3. Kiến trúc tổng thể
 
 ```text
-Desktop UI / CLI / Flask-FastAPI local API / Autofill Agent
+Desktop UI / CLI / Local API / Browser Extension / Autofill Agent
+                              |
+                              v
+                      credential_service.py
+                         |              |
+                         v              v
+               credential_repo.py      validator.py
                          |
                          v
-                  vault_service.py
-                  (business logic + session)
-                    |              |
-                    v              v
-              crypto.py       vault_repo.py
-                    |              |
-                    |              v
-                    |           db.py
-                    |              |
-                    v              v
-             RAM: session key      MariaDB
+                       db.py
+                         |
+                         v
+                      MariaDB
 ```
 
 ### Quy tắc phụ thuộc
 
 ```text
-ui/api/agent -> service -> repo -> db
-                     |
-                     -> crypto
-matcher -> repo
+UI/API/Agent -> credential_service -> credential_repo -> db
+                         |
+                         -> validator
+matcher -> credential_repo
 ```
 
-- `crypto.py` không import `db.py`, `vault_repo.py` hay framework web.
-- `db.py` không biết bảng vault nào và không biết mã hóa.
-- `vault_repo.py` chỉ biết SQL/schema, không giữ master password và không decrypt.
-- `vault_service.py` là cửa duy nhất để mã hóa, giải mã, unlock và lock vault.
-- UI/API/agent không được query trực tiếp các cột `password_encrypted`.
+- `db.py` chỉ quản lý connection pool/transaction.
+- `credential_repo.py` chỉ chứa SQL CRUD theo schema.
+- `credential_service.py` là nơi áp dụng validation và workflow nghiệp vụ.
+- `autofill_matcher.py` tìm candidate; không tự gửi phím hay điền password.
+- Adapter theo OS/browser là nơi thực thi action autofill.
 
 ---
 
-## 3. Cấu trúc thư mục đề xuất
+## 4. Cấu trúc thư mục đề xuất
 
 ```text
-password-vault/
+password-store/
 ├── app/
 │   ├── __init__.py
 │   ├── config.py
 │   ├── db.py
-│   ├── crypto.py
 │   ├── exceptions.py
-│   ├── vault_repo.py
-│   ├── vault_service.py
+│   ├── validator.py
+│   ├── credential_repo.py
+│   ├── credential_service.py
 │   ├── autofill_matcher.py
-│   ├── audit_service.py                 # tùy chọn ở v1.1
-│   └── api.py                            # Flask/FastAPI, nếu cần API local
+│   ├── audit_service.py                 # optional
+│   ├── api.py                            # optional Flask/FastAPI local API
+│   └── autofill/
+│       ├── base.py
+│       ├── windows_agent.py
+│       └── browser_native_host.py
 ├── migrations/
 │   ├── 001_initial_schema.sql
 │   └── 002_*.sql
 ├── tests/
-│   ├── test_crypto.py
-│   ├── test_vault_repo.py
-│   ├── test_vault_service.py
+│   ├── test_validator.py
+│   ├── test_credential_repo.py
+│   ├── test_credential_service.py
 │   └── test_autofill_matcher.py
-├── .env                                 # không commit
-├── .env.example                         # commit, không có secret thật
+├── .env
+├── .env.example
 ├── .gitignore
 ├── requirements.txt
 └── main.py
@@ -90,26 +122,153 @@ password-vault/
 
 ---
 
-## 4. Module `config.py`
+## 5. Schema MariaDB mới
+
+Schema này thay thế schema vault có cột `*_encrypted`, `*_nonce`, `vault_meta`, `kdf_*`, `verifier_*`.
+
+### 5.1 Bảng `credentials`
+
+```sql
+CREATE TABLE IF NOT EXISTS credentials (
+    id                  CHAR(36) NOT NULL PRIMARY KEY,
+
+    title               VARCHAR(255) NOT NULL,
+    platform_type       ENUM('web', 'desktop_app', 'android_app', 'other') NOT NULL,
+    platform_identifier VARCHAR(512) NULL,
+
+    username            VARCHAR(512) NOT NULL,
+    password            TEXT NOT NULL,
+    totp_secret         VARCHAR(512) NULL,
+    notes               TEXT NULL,
+
+    url                 VARCHAR(2048) NULL,
+    tags                JSON NULL,
+    favorite            BOOLEAN NOT NULL DEFAULT FALSE,
+
+    created_at          DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at          DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                                        ON UPDATE CURRENT_TIMESTAMP(6),
+    last_used_at        DATETIME(6) NULL,
+
+    INDEX idx_credentials_platform (platform_type, platform_identifier),
+    INDEX idx_credentials_username (username),
+    INDEX idx_credentials_title (title),
+    INDEX idx_credentials_favorite (favorite)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
+
+### 5.2 Bảng `autofill_rules`
+
+Một credential có thể có nhiều điều kiện match: domain cho web, executable/window title cho desktop app hoặc package name cho Android.
+
+```sql
+CREATE TABLE IF NOT EXISTS autofill_rules (
+    id                CHAR(36) NOT NULL PRIMARY KEY,
+    credential_id     CHAR(36) NOT NULL,
+
+    match_type        ENUM(
+                          'domain',
+                          'exact_url',
+                          'process_name',
+                          'window_title_regex',
+                          'android_package',
+                          'resource_id_hint'
+                      ) NOT NULL,
+    match_value       VARCHAR(2048) NOT NULL,
+    priority          INT NOT NULL DEFAULT 0,
+    is_enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+
+    created_at        DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at        DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+                                      ON UPDATE CURRENT_TIMESTAMP(6),
+
+    CONSTRAINT fk_autofill_rules_credential
+        FOREIGN KEY (credential_id)
+        REFERENCES credentials(id)
+        ON DELETE CASCADE,
+
+    INDEX idx_autofill_rules_match (match_type, match_value),
+    INDEX idx_autofill_rules_credential (credential_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
+
+### 5.3 Bảng `password_history` (tùy chọn)
+
+Nếu không cần rollback password, bỏ cả bảng và trigger này.
+
+```sql
+CREATE TABLE IF NOT EXISTS password_history (
+    id                CHAR(36) NOT NULL PRIMARY KEY,
+    credential_id     CHAR(36) NOT NULL,
+    password          TEXT NOT NULL,
+    changed_at        DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+
+    CONSTRAINT fk_password_history_credential
+        FOREIGN KEY (credential_id)
+        REFERENCES credentials(id)
+        ON DELETE CASCADE,
+
+    INDEX idx_password_history_credential (credential_id, changed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
+
+### 5.4 Trigger lưu password cũ (tùy chọn)
+
+```sql
+DELIMITER //
+
+CREATE TRIGGER trg_credentials_password_history
+BEFORE UPDATE ON credentials
+FOR EACH ROW
+BEGIN
+    IF NOT (OLD.password <=> NEW.password) THEN
+        INSERT INTO password_history (id, credential_id, password, changed_at)
+        VALUES (UUID(), OLD.id, OLD.password, CURRENT_TIMESTAMP(6));
+    END IF;
+END//
+
+DELIMITER ;
+```
+
+### 5.5 Bảng migration (khuyến nghị)
+
+```sql
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version           VARCHAR(255) NOT NULL PRIMARY KEY,
+    applied_at        DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
+
+### Ghi chú schema
+
+- Password là `TEXT` plaintext; **không có** `password_encrypted`, `password_nonce`.
+- `totp_secret` và `notes` cũng plaintext theo yêu cầu bỏ crypto; có thể bỏ hai cột nếu không cần.
+- UUID được tạo ở Python bằng `str(uuid.uuid4())`; không nên phụ thuộc trigger để tạo ID chính.
+- `JSON` cho `tags` phù hợp nếu MariaDB của bạn hỗ trợ JSON. Nếu muốn tương thích tối đa, dùng `TEXT` chứa JSON array.
+- Với web, dùng `autofill_rules.match_type = 'domain'` để match host; `url` chỉ là metadata/hiển thị.
+
+---
+
+## 6. Module `config.py`
 
 ### Trách nhiệm
 
-- Load biến môi trường từ `.env` trong local development.
-- Kiểm tra biến bắt buộc khi app khởi động.
-- Cung cấp một object cấu hình readonly cho các module khác.
+- Load cấu hình từ OS environment/.env.
+- Validate DB config và local API config.
+- Không chứa credential app hardcode.
 
 ### Biến môi trường
 
 ```dotenv
 DB_HOST=127.0.0.1
 DB_PORT=3306
-DB_USER=vault_user
+DB_USER=credential_store_user
 DB_PASSWORD=change_me
-DB_NAME=password_vault
+DB_NAME=credential_store
 DB_POOL_SIZE=5
-VAULT_AUTOLOCK_MINUTES=10
 LOCAL_API_HOST=127.0.0.1
 LOCAL_API_PORT=8765
+LOCAL_API_TOKEN=generate_a_long_random_value
 ```
 
 ### Public API đề xuất
@@ -123,215 +282,153 @@ class Settings:
     db_password: str
     db_name: str
     db_pool_size: int
-    vault_autolock_minutes: int
     local_api_host: str
     local_api_port: int
+    local_api_token: str
 
 
 def load_settings() -> Settings:
-    """Load .env/env, validate và trả về Settings."""
+    pass
+```
+
+---
+
+## 7. Module `db.py`
+
+### Trách nhiệm
+
+- Tạo `mariadb.ConnectionPool` singleton.
+- Cấp connection qua context manager.
+- Commit/rollback transaction.
+- Không biết tên bảng và không chứa logic credential.
+
+### Public API đề xuất
+
+```python
+from contextlib import contextmanager
+
+
+def init_pool(settings: Settings) -> None:
+    pass
+
+
+@contextmanager
+def get_connection():
+    """Yield MariaDB connection; close() sẽ trả về pool."""
+    pass
+
+
+@contextmanager
+def transaction(dictionary: bool = False):
+    """Yield cursor, commit nếu thành công và rollback nếu có exception."""
+    pass
+
+
+def close_pool() -> None:
+    pass
 ```
 
 ### Quy tắc
 
-- `.env` không được commit Git.
-- Không in `db_password`, master password, session key hoặc ciphertext ra log debug.
-- Không tự generate master password hay DB password trong code runtime.
+- Luôn parameterize SQL bằng placeholder `?` của MariaDB Connector/Python.
+- Không đưa password vào SQL string bằng f-string/format.
+- `transaction()` dùng cho create/update/delete và insert rule đi kèm credential.
 
 ---
 
-## 5. Module `db.py`
+## 8. Module `exceptions.py`
+
+```python
+class CredentialStoreError(Exception):
+    pass
+
+class CredentialNotFoundError(CredentialStoreError):
+    pass
+
+class ValidationError(CredentialStoreError):
+    pass
+
+class DuplicateRuleError(CredentialStoreError):
+    pass
+
+class LocalApiUnauthorizedError(CredentialStoreError):
+    pass
+```
+
+Không cần các exception liên quan crypto như `VaultLockedError`, `InvalidMasterPasswordError` hoặc `VaultIntegrityError` vì phiên bản này không có vault encryption/unlock.
+
+---
+
+## 9. Module `validator.py`
 
 ### Trách nhiệm
 
-- Tạo và quản lý `mariadb.ConnectionPool` duy nhất cho toàn app.
-- Cấp/trả connection an toàn qua context manager.
-- Cung cấp transaction helper.
-- Không chứa business logic và không chứa SQL theo bảng cụ thể.
+- Validate và normalize input trước khi ghi DB.
+- Không query DB, không tự lưu dữ liệu.
 
 ### Public API đề xuất
 
 ```python
-@contextmanager
-def get_connection():
-    """Mượn connection từ pool, trả lại pool khi kết thúc block."""
+VALID_PLATFORM_TYPES = {'web', 'desktop_app', 'android_app', 'other'}
+VALID_MATCH_TYPES = {
+    'domain', 'exact_url', 'process_name',
+    'window_title_regex', 'android_package', 'resource_id_hint',
+}
 
 
-def init_pool(settings: Settings) -> None:
-    """Khởi tạo pool một lần khi app startup."""
+def validate_credential_input(data: dict) -> dict:
+    """Trim/normalize, raise ValidationError nếu input không hợp lệ."""
 
 
-def close_pool() -> None:
-    """Đóng pool khi app shutdown."""
+def validate_rule_input(rule: dict) -> dict:
+    pass
 
 
-@contextmanager
-def transaction():
-    """Yield cursor; commit khi thành công, rollback khi lỗi."""
+def normalize_domain(value: str) -> str:
+    """Lấy lowercase hostname, không tự match suffix nguy hiểm."""
+
+
+def normalize_tags(tags: list[str] | None) -> list[str]:
+    pass
 ```
 
-### Ví dụ dùng
+### Rule validation
 
-```python
-from app.db import transaction
-
-with transaction() as cursor:
-    cursor.execute(
-        "UPDATE vault_items SET favorite = ? WHERE id = ?",
-        (1, item_id),
-    )
-```
-
-### Quy tắc transaction
-
-- Mọi thay đổi `INSERT`, `UPDATE`, `DELETE` dùng `transaction()`.
-- Hàm đọc `SELECT` có thể dùng `get_connection()` và đóng cursor sau khi fetch.
-- Query parameterized bắt buộc dùng placeholder `?`; không ghép chuỗi SQL bằng f-string với input người dùng.
-
----
-
-## 6. Module `crypto.py`
-
-### Trách nhiệm
-
-- Derive key từ master password bằng Argon2id.
-- Sinh/kiểm tra verifier để xác nhận master password đúng.
-- Mã hóa và giải mã field bằng AES-256-GCM.
-- Sinh salt, nonce an toàn bằng `os.urandom()`.
-- Hoàn toàn không gọi database.
-
-### Thuật toán và dữ liệu
-
-| Hạng mục | Cách dùng |
+| Field | Quy tắc |
 |---|---|
-| KDF | Argon2id |
-| KDF salt | 16 bytes ngẫu nhiên, lưu ở `vault_meta` |
-| Session encryption key | 32 bytes raw key derive từ master password + `kdf_salt` |
-| Mã hóa | AES-256-GCM |
-| Nonce AES-GCM | 12 bytes ngẫu nhiên, mới cho mỗi lần encrypt |
-| Associated Data (AAD) | `vault_item_id + field_name`, để ciphertext không thể hoán đổi field/item |
-| Password verifier | Một verifier derive riêng với `verifier_salt` riêng; không dùng ciphertext làm verifier |
-
-### Public API đề xuất
-
-```python
-@dataclass(frozen=True)
-class KdfParams:
-    memory_cost: int
-    time_cost: int
-    parallelism: int
-
-
-def generate_salt(length: int = 16) -> bytes:
-    pass
-
-
-def derive_key(master_password: str, salt: bytes, params: KdfParams) -> bytes:
-    """Trả raw 32-byte key từ Argon2id."""
-
-
-def create_verifier(master_password: str, params: KdfParams) -> tuple[bytes, bytes]:
-    """Trả (verifier_hash, verifier_salt)."""
-
-
-def verify_master_password(
-    master_password: str,
-    verifier_hash: bytes,
-    verifier_salt: bytes,
-    params: KdfParams,
-) -> bool:
-    pass
-
-
-def encrypt_field(
-    plaintext: str,
-    key: bytes,
-    aad: bytes,
-) -> tuple[bytes, bytes]:
-    """Trả (ciphertext, nonce)."""
-
-
-def decrypt_field(
-    ciphertext: bytes,
-    nonce: bytes,
-    key: bytes,
-    aad: bytes,
-) -> str:
-    """Ném InvalidTag nếu ciphertext/nonce/key/AAD không hợp lệ."""
-```
-
-### Quy tắc bắt buộc
-
-- Không dùng `hash()` của Python để tạo key.
-- Không dùng ECB, CBC không có MAC, hoặc Fernet key hardcode.
-- Không tái sử dụng nonce với cùng AES key.
-- `bytes` là immutable nên không thể bảo đảm xóa tuyệt đối key khỏi RAM bằng Python; tuy vậy phải xóa mọi reference khi lock.
-- Không trả plaintext password trong exception/log.
+| `title` | 1–255 ký tự sau trim |
+| `platform_type` | `web`, `desktop_app`, `android_app`, `other` |
+| `username` | Không rỗng, tối đa 512 ký tự |
+| `password` | Không rỗng khi tạo/update password; không log |
+| `url` | Nếu có, `http://` hoặc `https://` |
+| `tags` | List string, lowercase/trim/bỏ duplicate |
+| `match_type` | Nằm trong tập cho phép |
+| `window_title_regex` | Giới hạn độ dài; chỉ compile để kiểm tra syntax, không execute trên input không kiểm soát nếu chưa có timeout |
 
 ---
 
-## 7. Module `exceptions.py`
+## 10. Module `credential_repo.py`
 
 ### Trách nhiệm
 
-Tập trung exception nghiệp vụ để API/UI xử lý nhất quán, không expose lỗi DB/crypto thô cho frontend.
+- CRUD với bảng `credentials`, `autofill_rules`, `password_history`.
+- Trả password plaintext **chỉ ở các hàm explicit cần secret**.
+- Không có logic autofill UI, không gửi phím/clipboard.
 
-### Exception đề xuất
-
-```python
-class VaultError(Exception):
-    pass
-
-class VaultNotInitializedError(VaultError):
-    pass
-
-class VaultLockedError(VaultError):
-    pass
-
-class InvalidMasterPasswordError(VaultError):
-    pass
-
-class CredentialNotFoundError(VaultError):
-    pass
-
-class DuplicateAutofillRuleError(VaultError):
-    pass
-
-class VaultIntegrityError(VaultError):
-    """Ciphertext không xác thực được hoặc record có cấu trúc sai."""
-    pass
-```
-
----
-
-## 8. Module `vault_repo.py`
-
-### Trách nhiệm
-
-- CRUD trực tiếp với `vault_meta`, `vault_items`, `autofill_rules`, `password_history`.
-- Nhận/trả ciphertext, nonce dưới dạng `bytes`.
-- Không derive key, không encrypt/decrypt, không quản lý session unlock.
-- Chạy qua `db.py`; không tự tạo connection riêng.
-
-### Data model truyền trong module
+### Data model gợi ý
 
 ```python
 @dataclass
-class EncryptedField:
-    ciphertext: bytes
-    nonce: bytes
-
-@dataclass
-class VaultItemRecord:
+class CredentialRecord:
     id: str
     title: str
     platform_type: str
     platform_identifier: str | None
     username: str
-    password: EncryptedField
-    totp_secret: EncryptedField | None
+    password: str
+    totp_secret: str | None
+    notes: str | None
     url: str | None
-    notes: EncryptedField | None
     tags: list[str]
     favorite: bool
     created_at: datetime
@@ -342,61 +439,52 @@ class VaultItemRecord:
 ### Public API đề xuất
 
 ```python
-# vault_meta
+# credentials
 
-def get_vault_meta() -> dict | None:
+def insert_credential(record: CredentialRecord) -> str:
     pass
 
 
-def create_vault_meta(meta: dict) -> None:
-    pass
-
-# vault_items
-
-def insert_item(record: VaultItemRecord) -> str:
-    pass
+def get_credential_by_id(item_id: str, include_password: bool = False) -> dict | None:
+    """Mặc định không select password/totp/notes để giảm exposure không cần thiết."""
 
 
-def get_item_by_id(item_id: str) -> VaultItemRecord | None:
-    pass
-
-
-def list_item_summaries(
+def list_credential_summaries(
     platform_type: str | None = None,
     search: str | None = None,
     favorite_only: bool = False,
+    limit: int = 100,
+    offset: int = 0,
 ) -> list[dict]:
-    """Chỉ trả metadata + username plaintext, không trả encrypted fields."""
-
-
-def update_item_metadata(item_id: str, **metadata) -> bool:
     pass
 
 
-def update_item_password(item_id: str, encrypted_password: EncryptedField) -> bool:
-    """Trigger DB tự thêm password cũ vào password_history."""
-
-
-def delete_item(item_id: str) -> bool:
+def update_credential_metadata(item_id: str, data: dict) -> bool:
     pass
 
 
-def mark_item_used(item_id: str) -> None:
-    pass
+def update_credential_password(item_id: str, new_password: str) -> bool:
+    """Trigger sẽ lưu password cũ vào password_history nếu trigger được bật."""
 
-# autofill_rules
 
-def add_autofill_rule(
-    item_id: str,
-    match_type: str,
-    match_value: str,
-    field_role: str,
-    priority: int = 0,
-) -> str:
+def delete_credential(item_id: str) -> bool:
     pass
 
 
-def list_autofill_rules(item_id: str) -> list[dict]:
+def mark_credential_used(item_id: str) -> None:
+    pass
+
+# autofill rules
+
+def add_autofill_rule(credential_id: str, rule: dict) -> str:
+    pass
+
+
+def list_autofill_rules(credential_id: str) -> list[dict]:
+    pass
+
+
+def update_autofill_rule(rule_id: str, rule: dict) -> bool:
     pass
 
 
@@ -404,177 +492,120 @@ def delete_autofill_rule(rule_id: str) -> bool:
     pass
 
 
-def find_item_candidates(match_type: str, match_value: str) -> list[dict]:
-    """Trả id/title/username/priority; không lấy hay decrypt password."""
+def find_candidates(match_type: str, match_value: str) -> list[dict]:
+    """Trả id/title/username/priority/favorite/last_used_at, không select password."""
 
-# history
+# password history optional
 
-def list_password_history(item_id: str) -> list[dict]:
+def list_password_history(credential_id: str) -> list[dict]:
     pass
 ```
 
-### Query cần đảm bảo
+### Phân tách query summary và secret
 
-- `tags` lưu JSON text, parse bằng `json.loads()` khi trả object.
-- `username` plaintext cho phép search `LIKE ?`; phải escape `%` và `_` nếu search là literal.
-- Mọi BLOB truyền thẳng dạng `bytes`; không base64 trước khi ghi MariaDB trừ khi đi qua JSON API.
-- `get_item_by_id()` phải lấy đủ nonce tương ứng của từng field.
+```python
+# Dùng cho list/search/autofill suggestion.
+SELECT id, title, platform_type, platform_identifier, username,
+       url, tags, favorite, last_used_at
+FROM credentials
+...
+
+# Chỉ dùng khi chuẩn bị điền password sau khi đã chọn item.
+SELECT id, username, password, totp_secret
+FROM credentials
+WHERE id = ?
+```
+
+Dù DB là plaintext, vẫn tách query như vậy để password không bị load nhầm vào memory/log/response khi không cần.
 
 ---
 
-## 9. Module `vault_service.py`
+## 11. Module `credential_service.py`
 
 ### Trách nhiệm
 
-Đây là **lớp nghiệp vụ trung tâm** và là nơi duy nhất được phép giữ session encryption key. UI, API và agent gọi các hàm ở đây, không gọi thẳng repo để lấy credential nhạy cảm.
-
-### State trong memory
-
-```python
-class VaultService:
-    _session_key: bytes | None
-    _unlocked_at: datetime | None
-    _last_activity_at: datetime | None
-    _auto_lock_seconds: int
-```
+Là lớp nghiệp vụ trung tâm. Module này không cần crypto/session key, nhưng cần kiểm soát workflow và hạn chế lúc password plaintext được đưa ra ngoài.
 
 ### Public API đề xuất
 
 ```python
-class VaultService:
-    def initialize(self, master_password: str) -> None:
-        """Tạo meta khi vault hoàn toàn mới; lỗi nếu meta đã tồn tại."""
-
-    def unlock(self, master_password: str) -> None:
-        """Verify master password, derive và giữ session key trong RAM."""
-
-    def lock(self) -> None:
-        """Bỏ mọi reference session key và trạng thái unlock."""
-
-    def is_unlocked(self) -> bool:
-        pass
-
-    def check_auto_lock(self) -> bool:
-        """Nếu idle quá timeout thì lock; trả True nếu vừa lock."""
-
-    def add_credential(
-        self,
-        title: str,
-        platform_type: str,
-        username: str,
-        password: str,
-        platform_identifier: str | None = None,
-        url: str | None = None,
-        notes: str | None = None,
-        totp_secret: str | None = None,
-        tags: list[str] | None = None,
-        rules: list[dict] | None = None,
-    ) -> str:
-        pass
+class CredentialService:
+    def create_credential(self, data: dict, rules: list[dict] | None = None) -> str:
+        """Validate -> tạo UUID -> insert credential + rules trong 1 transaction."""
 
     def list_credentials(self, **filters) -> list[dict]:
-        """Không yêu cầu unlock nếu chỉ trả metadata + username."""
+        """Chỉ trả summary, không password."""
 
-    def get_credential(self, item_id: str, include_secrets: bool = True) -> dict:
-        """Nếu include_secrets=True thì yêu cầu vault unlocked."""
-
-    def update_credential_metadata(self, item_id: str, **metadata) -> None:
+    def get_credential_summary(self, credential_id: str) -> dict:
         pass
 
-    def change_password(self, item_id: str, new_password: str) -> None:
+    def get_autofill_payload(self, credential_id: str) -> dict:
+        """Trả username/password chỉ sau khi caller đã chọn credential cụ thể."""
+
+    def update_credential(self, credential_id: str, data: dict) -> None:
+        """Update metadata và/hoặc password."""
+
+    def delete_credential(self, credential_id: str) -> None:
         pass
 
-    def delete_credential(self, item_id: str) -> None:
+    def add_rule(self, credential_id: str, rule: dict) -> str:
         pass
 
-    def get_totp_code(self, item_id: str, now: datetime | None = None) -> str:
-        """Decrypt TOTP secret khi cần, generate code; không lưu code xuống DB."""
+    def find_autofill_candidates(self, context: AutofillContext) -> list[dict]:
+        pass
 ```
 
-### Luồng `initialize()`
+### Luồng `create_credential()`
 
 ```text
-1. Validate master password không rỗng.
-2. Kiểm tra vault_meta chưa tồn tại.
-3. Tạo kdf_salt.
-4. Derive session key = Argon2id(master_password, kdf_salt).
-5. Tạo verifier_hash + verifier_salt riêng.
-6. Ghi vault_meta qua vault_repo.create_vault_meta().
-7. Giữ session key trong RAM, vault được coi là unlock.
+1. validate_credential_input(data).
+2. Tạo credential_id bằng uuid.uuid4().
+3. Build CredentialRecord; password giữ nguyên plaintext.
+4. Begin transaction.
+5. INSERT credentials.
+6. Validate và INSERT từng autofill_rule.
+7. Commit; nếu một rule lỗi thì rollback cả credential và rule.
+8. Trả credential_id.
 ```
 
-### Luồng `unlock()`
+### Luồng `get_autofill_payload()`
 
 ```text
-1. Đọc vault_meta.
-2. Lấy KdfParams từ DB.
-3. Verify master password bằng verifier.
-4. Nếu sai: ném InvalidMasterPasswordError; không log password.
-5. Nếu đúng: derive session key từ kdf_salt.
-6. Set _unlocked_at và _last_activity_at.
+1. Lấy credential theo id với include_password=True.
+2. Nếu không tồn tại: CredentialNotFoundError.
+3. Lấy đúng field cần dùng: username, password, optional totp_secret.
+4. Cập nhật last_used_at.
+5. Trả payload cho adapter nội bộ.
+6. Không ghi payload vào log, không cache dài hạn, không trả toàn bộ notes/history.
 ```
 
-### Luồng `add_credential()`
+### Luồng `update_credential()`
 
 ```text
-1. check_auto_lock(); require vault unlocked.
-2. Validate title/platform_type/username/password.
-3. Sinh item_id UUID trước để dùng làm AAD.
-4. Mã hóa password với AAD = f"{item_id}:password".
-5. Nếu có notes/TOTP: mã hóa từng field với AAD riêng.
-6. Build VaultItemRecord; username giữ plaintext.
-7. Trong 1 DB transaction:
-   - insert vault_items
-   - insert từng autofill_rule (nếu có)
-8. Cập nhật last activity.
-9. Trả item_id.
+1. Validate các field được phép update.
+2. Nếu password thay đổi: gọi update_credential_password(); trigger history (nếu có) chạy tự động.
+3. Update metadata/title/username/url/tags/favorite ở query riêng hoặc cùng transaction.
+4. Không trả password trong response update.
 ```
-
-### Luồng `get_credential()`
-
-```text
-1. check_auto_lock().
-2. Repo lấy record encrypted theo item_id.
-3. Nếu không tồn tại: CredentialNotFoundError.
-4. Nếu chỉ xem metadata: trả ngay summary.
-5. require vault unlocked.
-6. Decrypt password bằng AAD đúng item_id/field_name.
-7. Chỉ decrypt notes và TOTP nếu caller thật sự yêu cầu.
-8. Không cache password plaintext lâu hơn request hiện tại.
-9. Cập nhật last_used_at nếu đây là action autofill/copy.
-```
-
-### Validation đề xuất
-
-| Field | Rule |
-|---|---|
-| `title` | 1–255 ký tự, trim whitespace |
-| `platform_type` | Một trong `web`, `desktop_app`, `android_app`, `other` |
-| `username` | Không rỗng; plaintext theo yêu cầu |
-| `password` | Không rỗng khi tạo credential login; không log |
-| `platform_identifier` | Domain, executable/window title hoặc package name tùy type |
-| `url` | Nếu có, phải bắt đầu bằng `https://` hoặc `http://` |
-| `tags` | List string, normalize lowercase/trim, bỏ duplicate |
-| `rules` | `match_type` phải thuộc tập cho phép; reject regex quá dài/nguy hiểm |
 
 ---
 
-## 10. Module `autofill_matcher.py`
+## 12. Module `autofill_matcher.py`
 
 ### Trách nhiệm
 
-- Nhận context từ desktop agent/browser extension.
-- Chuẩn hóa domain, executable/window title hoặc app package.
-- Tìm credential candidate theo `autofill_rules`.
-- Không decrypt password trong bước tìm kiếm/gợi ý.
+- Chuẩn hóa context của browser/app.
+- Tìm rule phù hợp và trả candidate metadata.
+- Quyết định thứ tự gợi ý; không tự điền password.
 
-### Input context
+### Data model
 
 ```python
 @dataclass(frozen=True)
 class AutofillContext:
-    source: str                    # "browser", "desktop", "android"
+    source: str                  # browser | desktop | android
     domain: str | None = None
+    url: str | None = None
     process_name: str | None = None
     window_title: str | None = None
     package_name: str | None = None
@@ -583,45 +614,40 @@ class AutofillContext:
 ### Public API đề xuất
 
 ```python
-def normalize_domain(url_or_host: str) -> str:
-    """Lowercase, bỏ port/path, xử lý www. theo policy rõ ràng."""
+def build_match_requests(context: AutofillContext) -> list[tuple[str, str]]:
+    """VD browser: [('exact_url', url), ('domain', normalized_domain)]."""
 
 def find_candidates(context: AutofillContext) -> list[dict]:
-    """Trả item_id/title/username/priority; tuyệt đối không trả password."""
+    pass
 
-def choose_best_candidate(candidates: list[dict]) -> dict | None:
-    """Ưu tiên priority rồi last_used_at/favorite; vẫn để user xác nhận nếu >1 candidate."""
+def rank_candidates(candidates: list[dict]) -> list[dict]:
+    """priority giảm dần -> favorite -> last_used_at mới nhất."""
 ```
 
-### Chiến lược match
+### Quy tắc matching
 
-| Nguồn | Rule | Ví dụ match_value |
+| Nguồn | Match type ưu tiên | Ví dụ |
 |---|---|---|
-| Browser | `domain` | `accounts.google.com` hoặc `google.com` |
-| Windows desktop | `window_title_regex` | `^.*VPN Client.*$` |
-| Windows desktop | `process_name` (nếu bổ sung) | `telegram.exe` |
+| Browser | `exact_url`, rồi `domain` | `https://accounts.example.com/login`, `accounts.example.com` |
+| Desktop app | `process_name`, rồi `window_title_regex` | `telegram.exe`, `^.*Telegram.*$` |
 | Android automation | `android_package` | `com.zhiliaoapp.musically` |
-| UI automation | `resource_id_hint` | `com.app:id/password` |
+| UI automation | `resource_id_hint` | `com.example:id/password` |
 
-### Quy tắc an toàn
+### Ràng buộc an toàn
 
-- Browser: so khớp exact host trước; không tự coi `evil-google.com` là `google.com`.
-- Regex window title: compile có timeout/giới hạn độ dài nếu regex do user nhập.
-- Nếu nhiều candidate cùng điểm: trả danh sách cho UI chọn, không tự điền ngẫu nhiên.
-- Chỉ sau khi user/agent xác định `item_id` mới gọi `vault_service.get_credential()`.
+- Không match domain bằng `endswith()` tùy tiện; `google.com.evil.tld` không được match `google.com`.
+- Nếu có nhiều credential phù hợp, UI phải hiển thị danh sách để người dùng chọn; không tự chọn bừa chỉ dựa vào username.
+- Candidate response không có `password`.
 
 ---
 
-## 11. Module `autofill_agent` (adapter theo OS)
-
-Module này nên tách theo nền tảng vì nó phụ thuộc OS, không thuộc vault core.
+## 13. Module `autofill` adapters
 
 ```text
 app/autofill/
 ├── base.py
 ├── windows_agent.py
-├── browser_native_host.py
-└── android_uiautomator_adapter.py      # chỉ nếu tái dùng cho TikTool
+└── browser_native_host.py
 ```
 
 ### `base.py`
@@ -631,312 +657,257 @@ class AutofillAdapter(Protocol):
     def get_context(self) -> AutofillContext:
         pass
 
-    def fill_username(self, username: str) -> None:
-        pass
-
-    def fill_password(self, password: str) -> None:
+    def fill(self, username: str, password: str) -> None:
         pass
 ```
 
 ### `windows_agent.py`
 
-- Đăng ký global hotkey.
+Trách nhiệm:
+
+- Đăng ký global hotkey, ví dụ `Ctrl+Alt+A`.
 - Lấy active window/process qua Win32 API.
-- Dùng UI Automation nếu app đích expose control tree.
-- Fallback Auto-Type (`username -> TAB -> password`) nếu không có UI Automation.
-- Không chạy trong Docker; phải là native process trên Windows.
+- Gọi `CredentialService.find_autofill_candidates()`.
+- Hiển thị popup chọn credential nếu có nhiều candidate.
+- Sau chọn: gọi `get_autofill_payload()` và dùng UI Automation/Auto-Type để điền.
+- Xóa reference payload sau khi action hoàn tất.
 
 ### `browser_native_host.py`
 
-- Giao tiếp Native Messaging stdin/stdout với browser extension.
-- Nhận domain/tab context.
-- Chỉ trả candidate metadata khi vault lock.
-- Chỉ trả secret sau unlock và sau khi extension gửi request hợp lệ theo protocol local.
+Trách nhiệm:
+
+- Giao tiếp với browser extension qua Native Messaging (stdin/stdout).
+- Nhận URL/domain hiện tại từ extension.
+- Trả candidate list không chứa password.
+- Chỉ trả autofill payload cho credential ID mà user đã chọn.
+- Không in protocol payload chứa password ra stdout debug/log ngoài kênh Native Messaging.
 
 ---
 
-## 12. Module `api.py` (tùy chọn)
+## 14. Module `api.py` (tùy chọn)
 
-Chỉ cần nếu desktop UI, extension hoặc automation script cần gọi vault qua HTTP local.
+Chỉ dùng nếu UI/agent nằm process khác hoặc bạn muốn automation script gọi qua HTTP local.
 
-### Ràng buộc triển khai
+### Ràng buộc
 
-- Bind duy nhất `127.0.0.1`, không bind `0.0.0.0` mặc định.
-- Tạo local API token ngẫu nhiên khi app startup; token chỉ sống trong RAM.
-- Không expose endpoint bulk-export plaintext password.
-- Không log request body của endpoint có master password/password.
+- Bind `127.0.0.1`, không dùng `0.0.0.0` mặc định.
+- Header token bắt buộc: `X-Local-Token`.
+- Token lấy từ environment/OS credential store, không hardcode trong source.
+- Không ghi request/response body có password vào access log.
 
 ### Endpoint tối thiểu
 
-| Method | Path | Chức năng |
-|---|---|---|
-| `POST` | `/v1/vault/unlock` | Unlock vault, trả trạng thái chứ không trả key |
-| `POST` | `/v1/vault/lock` | Lock và xóa session key |
-| `GET` | `/v1/items` | List metadata + username |
-| `POST` | `/v1/items` | Add credential |
-| `GET` | `/v1/items/{id}` | Lấy metadata; secret chỉ khi có quyền/unlock |
-| `PATCH` | `/v1/items/{id}` | Update metadata/password |
-| `DELETE` | `/v1/items/{id}` | Xóa credential |
-| `POST` | `/v1/autofill/candidates` | Tìm candidate từ domain/window context |
-| `POST` | `/v1/autofill/fill-data` | Trả username/password cho item đã chọn; yêu cầu unlocked |
-
-### HTTP status gợi ý
-
-| Tình huống | Status |
-|---|---|
-| Vault chưa tạo | 409 |
-| Vault locked | 423 |
-| Master password sai | 401 |
-| Item không tồn tại | 404 |
-| Validation lỗi | 422 |
-| Ciphertext integrity lỗi | 500, không trả chi tiết crypto |
+| Method | Path | Mục đích | Có password trong response? |
+|---|---|---|---|
+| `GET` | `/v1/credentials` | List/search summary | Không |
+| `POST` | `/v1/credentials` | Tạo credential | Chỉ nhận request, không echo lại |
+| `GET` | `/v1/credentials/{id}` | Xem metadata | Không |
+| `PATCH` | `/v1/credentials/{id}` | Update metadata/password | Không echo password |
+| `DELETE` | `/v1/credentials/{id}` | Xóa credential | Không |
+| `POST` | `/v1/autofill/candidates` | Tìm candidate | Không |
+| `POST` | `/v1/autofill/payload` | Lấy username/password của item được chọn | Có, chỉ local authenticated caller |
 
 ---
 
-## 13. Module `audit_service.py` (tùy chọn)
+## 15. Module `audit_service.py` (optional)
 
-### Mục tiêu
+Dù không cần crypto, audit tối thiểu vẫn hữu ích để debug việc autofill.
 
-Theo dõi action tối thiểu mà không ghi secret vào log.
-
-### Event nên lưu
+### Chỉ nên ghi event metadata
 
 ```text
-VAULT_INITIALIZED
-VAULT_UNLOCKED
-VAULT_LOCKED
 CREDENTIAL_CREATED
 CREDENTIAL_UPDATED
-PASSWORD_CHANGED
 CREDENTIAL_DELETED
-AUTOFILL_REQUESTED
+PASSWORD_CHANGED
+AUTOFILL_CANDIDATES_REQUESTED
 AUTOFILL_COMPLETED
 ```
 
-### Tuyệt đối không lưu
+### Không bao giờ ghi
 
-- Master password.
-- Session key.
-- Plaintext password/TOTP/notes.
-- Ciphertext đầy đủ trong application log.
-
-Nếu chỉ dùng cá nhân, audit log có thể để phase sau. Nó hữu ích hơn khi debug autofill hoặc phát hiện app tự gọi API bất thường.
-
----
-
-## 14. MariaDB schema và migration
-
-### Bảng tối thiểu
-
-```text
-vault_meta          # 1 row: KDF params, salts, verifier
-vault_items         # credentials + encrypted secret fields
-password_history    # password ciphertext cũ
-autofill_rules      # rules để match target
-```
-
-### Kiểu dữ liệu MariaDB gợi ý
-
-| Ý nghĩa | Kiểu |
-|---|---|
-| UUID | `CHAR(36)` hoặc `BINARY(16)` |
-| Username/title/domain | `VARCHAR(...)` |
-| Ciphertext/nonce/salt | `BLOB` hoặc `VARBINARY(...)` |
-| Tags | `JSON` (nếu MariaDB version phù hợp) hoặc `TEXT` chứa JSON |
-| Timestamp | `DATETIME(6)` hoặc `TIMESTAMP` |
-| Platform/match type | `ENUM(...)` hoặc `VARCHAR` + validation tại service |
-
-### Migration workflow
-
-1. Không sửa trực tiếp file migration đã chạy trên DB.
-2. Mỗi thay đổi schema tạo file mới: `002_add_process_name_rule.sql`.
-3. Có bảng `schema_migrations(version, applied_at)` để ghi version đã apply.
-4. `migration_runner.py` chạy các file chưa apply trong transaction nếu MariaDB cho phép cho loại DDL đó.
-5. Backup DB trước migration thay đổi BLOB/crypto fields.
+- Password.
+- TOTP secret.
+- Notes nếu có thông tin nhạy cảm.
+- `DB_PASSWORD`, `LOCAL_API_TOKEN`.
+- Request body của endpoint create/update/autofill payload.
 
 ---
 
-## 15. Luồng nghiệp vụ chính
+## 16. Luồng nghiệp vụ chính
 
-### A. Khởi tạo lần đầu
+### A. Tạo credential
 
 ```text
-Desktop UI/CLI
-  -> VaultService.initialize(master_password)
-  -> Crypto: sinh KDF salt + derive key + verifier
-  -> VaultRepo: INSERT vault_meta
-  -> VaultService giữ session key trong RAM
+UI/API
+  -> CredentialService.create_credential(data, rules)
+  -> Validator validate/normalize
+  -> CredentialRepo INSERT credentials (username/password plaintext)
+  -> CredentialRepo INSERT autofill_rules
+  -> MariaDB commit
 ```
 
-### B. Thêm một credential
+### B. Hiển thị danh sách credential
 
 ```text
-UI/API nhận title, username, password
-  -> VaultService.require_unlocked()
-  -> Tạo UUID item_id
-  -> Crypto.encrypt_field(password, key, AAD=item_id:password)
-  -> Crypto.encrypt_field(notes/TOTP nếu có)
-  -> VaultRepo.insert_item(ciphertext, nonce, username plaintext, metadata)
-  -> VaultRepo.add_autofill_rule(...) nếu có
-  -> commit transaction
+UI/API
+  -> CredentialService.list_credentials()
+  -> CredentialRepo list_credential_summaries()
+  -> trả title/platform/username/tags/favorite
+  -> không SELECT password
 ```
 
-### C. Gợi ý autofill
+### C. Autofill browser/app desktop
 
 ```text
-Browser extension / Windows agent lấy context
+Agent/extension lấy domain hoặc active window
   -> AutofillMatcher.find_candidates(context)
-  -> VaultRepo.find_item_candidates(...)
-  -> Trả danh sách title + username (không password)
-  -> User chọn entry
-  -> VaultService.get_credential(item_id)
-  -> Crypto.decrypt_field(password, đúng AAD)
-  -> Adapter điền vào app/browser
-  -> VaultRepo.mark_item_used(item_id)
+  -> CredentialRepo.find_candidates()
+  -> trả title + username, không password
+  -> user chọn credential
+  -> CredentialService.get_autofill_payload(credential_id)
+  -> SELECT username + password
+  -> adapter fill vào app/browser
+  -> CredentialRepo.mark_credential_used()
 ```
 
 ### D. Đổi password
 
 ```text
-UI/API gửi password mới
-  -> VaultService.require_unlocked()
-  -> Crypto.encrypt_field(password mới)
-  -> VaultRepo.update_item_password(...)
-  -> MariaDB trigger insert ciphertext/password nonce cũ vào password_history
+UI/API
+  -> CredentialService.update_credential(... password mới ...)
+  -> CredentialRepo.update_credential_password()
+  -> MariaDB trigger lưu password cũ vào password_history (optional)
   -> commit
 ```
 
-### E. Auto-lock
+### E. Xóa credential
 
 ```text
-Mỗi request/action hoặc background timer
-  -> VaultService.check_auto_lock()
-  -> Nếu now - last_activity > timeout:
-       VaultService.lock()
-       xóa reference session key
-       agent/API từ chối request secret với VaultLockedError
+UI/API
+  -> CredentialService.delete_credential(id)
+  -> CredentialRepo.delete_credential(id)
+  -> FK CASCADE xóa autofill_rules và password_history
 ```
 
 ---
 
-## 16. Thứ tự triển khai khuyến nghị
+## 17. Thứ tự triển khai
 
-### Phase 1 — Vault core không UI
+### Phase 1 — Database access và CRUD
 
-1. Viết MariaDB schema/migration `001_initial_schema.sql`.
-2. Hoàn thiện `config.py` và `db.py`, test connection MariaDB.
-3. Viết `crypto.py`, test encrypt/decrypt/AAD/verifier.
-4. Viết `vault_repo.py`, test CRUD encrypted blob.
-5. Viết `vault_service.py`, test initialize/unlock/add/get/change/lock.
+1. Viết `migrations/001_initial_schema.sql` bằng schema ở mục 5.
+2. Viết `config.py`, `.env.example`, `.gitignore`.
+3. Viết `db.py`, test MariaDB connection pool.
+4. Viết `validator.py`.
+5. Viết `credential_repo.py` với create/list/get/update/delete.
+6. Viết `credential_service.py`.
+7. Tạo CLI test ở `main.py`.
 
-**Done criteria:** Có CLI nhỏ thêm credential, list credential và decrypt password khi vault unlocked.
+**Done criteria:** Tạo credential, list không lộ password, lấy password theo ID, update/delete hoạt động trên MariaDB.
 
-### Phase 2 — Quản lý credential
+### Phase 2 — Autofill matching
 
-1. Thêm `autofill_rules` CRUD.
-2. Thêm password history.
-3. Thêm filter/search metadata theo username/title/tag/platform.
-4. Thêm migration runner.
-5. Bổ sung unit/integration tests với MariaDB test database.
+1. Viết `autofill_matcher.py` domain/process matching.
+2. CRUD `autofill_rules`.
+3. Ranking theo priority/favorite/last_used_at.
+4. Test domain giả và nhiều candidate.
 
-**Done criteria:** Có thể quản lý entry và rules đầy đủ, reboot app vẫn unlock/decrypt đúng với master password.
+**Done criteria:** Domain/window context trả đúng candidate, không có password trong candidate list.
 
-### Phase 3 — Autofill desktop/browser
+### Phase 3 — Desktop/browser integration
 
-1. `autofill_matcher.py` với exact domain matching.
-2. Windows agent hotkey + active window detection.
-3. UI confirmation chọn credential nếu nhiều candidate.
-4. Native Messaging host + browser extension.
-5. Auto-lock, local token, audit event cơ bản.
+1. Windows global hotkey + active window detector.
+2. Popup UI chọn credential.
+3. Auto-Type/UI Automation adapter.
+4. Browser extension + Native Messaging host.
+5. Optional local API cho automation script.
 
-**Done criteria:** Browser/app desktop nhận đúng username/password chỉ sau khi vault unlock và user xác nhận.
+**Done criteria:** User nhấn hotkey/chọn entry, hệ thống chỉ lấy password ngay trước khi điền và không log password.
 
-### Phase 4 — Hardening
+### Phase 4 — Operational hardening
 
-1. Fuzz/negative test ciphertext bị sửa, nonce sai, AAD sai.
-2. Rà soát log để chắc chắn không log secret.
-3. DB account quyền tối thiểu (`SELECT/INSERT/UPDATE/DELETE` đúng schema, không root).
-4. Backup DB encrypted; kiểm tra restore.
-5. Code signing/packaging desktop agent nếu phát hành.
+1. MariaDB user riêng, quyền tối thiểu.
+2. Backup/restore và policy không upload dump plaintext lên cloud.
+3. Docker volume ownership/permission nếu DB chạy Docker.
+4. Kiểm tra `.env`, logs, Git history không chứa secret.
+5. Tắt/không publish local API khi không dùng.
 
 ---
 
-## 17. Test plan tối thiểu
+## 18. Test plan tối thiểu
 
-### `test_crypto.py`
+### `test_validator.py`
 
-- Encrypt/decrypt cùng key + nonce + AAD trả đúng plaintext.
-- Sai key, nonce, AAD hoặc ciphertext bị đổi phải fail.
-- Hai lần encrypt cùng plaintext phải có nonce/ciphertext khác.
-- Master password đúng verify thành công; sai thất bại.
+- Title/username/password rỗng bị từ chối.
+- Platform type sai bị từ chối.
+- Domain normalize đúng.
+- Tags trim, lowercase, bỏ duplicate.
 
-### `test_vault_repo.py`
+### `test_credential_repo.py`
 
-- Insert/get BLOB không bị biến đổi byte.
-- Delete `vault_items` cascade xóa rules/history.
-- Update password tạo history đúng (nếu dùng trigger).
-- Query candidate không trả cột password ciphertext nếu API query chỉ cần summary.
+- Insert rồi get có username/password đúng.
+- Summary query không chứa key `password`.
+- Update password hoạt động.
+- Delete credential cascade delete rules/history.
+- Parameterized query không lỗi với username chứa quote/ký tự Unicode.
 
-### `test_vault_service.py`
+### `test_credential_service.py`
 
-- Không thể add/get secret khi locked.
-- `initialize` chạy lần hai fail.
-- Unlock master password sai fail.
-- Add → lock → unlock → decrypt vẫn đúng.
-- Change password → current password đúng, history có ciphertext cũ.
-- Auto-lock xóa trạng thái unlock.
+- Create credential + rules là atomic: rule invalid thì không có credential mới.
+- `get_autofill_payload()` chỉ trả username/password/totp cần thiết.
+- `list_credentials()` không lộ password.
+- Update metadata không làm mất password.
 
 ### `test_autofill_matcher.py`
 
-- `accounts.google.com` không match domain giả `accounts.google.com.evil.tld`.
-- Nhiều candidate trả theo `priority`.
-- Candidate list không chứa password.
+- `google.com.evil.tld` không match rule `google.com`.
+- Exact URL ưu tiên hơn domain.
+- Nhiều candidate được sort theo priority/favorite/last_used_at.
+- Candidate list không bao giờ có password.
 
 ---
 
-## 18. Checklist an toàn trước khi dùng dữ liệu thật
+## 19. Checklist trước khi dùng
 
-- [ ] MariaDB user riêng, không dùng `root`.
-- [ ] DB chỉ bind localhost nếu không cần remote access.
-- [ ] `.env` trong `.gitignore`; đã kiểm tra Git history không chứa secret.
-- [ ] `password_encrypted`, `notes_encrypted`, `totp_secret_encrypted` là BLOB ciphertext, không phải plaintext.
-- [ ] Key derive từ master password chỉ lưu RAM khi unlocked.
-- [ ] Nonce AES-GCM sinh ngẫu nhiên mới cho từng lần encrypt.
-- [ ] AAD buộc ciphertext thuộc đúng `item_id` và field name.
-- [ ] Không log master password, password, TOTP hoặc session key.
-- [ ] App tự lock sau idle timeout.
-- [ ] DB backup được tạo từ ciphertext đã mã hóa và restore thử thành công.
-- [ ] Không expose API ra `0.0.0.0` nếu không có cơ chế auth/TLS thiết kế đầy đủ.
-
----
-
-## 19. Quyết định thiết kế hiện tại
-
-| Quyết định | Lý do |
-|---|---|
-| MariaDB | Bạn đã tạo DB/schema MariaDB và muốn một hàm truy cập DB dùng chung |
-| Raw SQL repository | Ít bảng, kiểm soát rõ BLOB/ciphertext, dễ đối chiếu schema SQL hiện tại |
-| Username plaintext | Theo yêu cầu; thuận tiện list/search khi vault khóa |
-| Password/TOTP/notes encrypted | Giảm rủi ro DB backup/file DB bị lộ |
-| Argon2id | Derive key từ master password với chi phí brute-force cao |
-| AES-256-GCM + AAD | Confidentiality + integrity, ràng buộc ciphertext đúng item/field |
-| Session key chỉ RAM | Không tạo file key hoặc lưu key trong MariaDB |
-| Browser/desktop adapters tách core | Không để logic Windows/UI/browser làm phức tạp vault core |
+- [ ] Đã hiểu password nằm plaintext trong MariaDB.
+- [ ] Chỉ dùng tài khoản test/automation hoặc dữ liệu không quan trọng.
+- [ ] MariaDB không expose Internet và app DB user không phải `root`.
+- [ ] `.env` nằm trong `.gitignore`.
+- [ ] Không có password trong terminal output, exception trace, app log hoặc analytics.
+- [ ] Local API bind `127.0.0.1` và có token nếu được bật.
+- [ ] Backup/Docker volume không tự sync lên cloud public.
+- [ ] Autofill yêu cầu user action rõ ràng (hotkey/chọn entry).
+- [ ] Summary/candidate APIs không trả password.
+- [ ] Password chỉ được query tại bước chuẩn bị fill hoặc màn hình xem chi tiết có chủ đích.
 
 ---
 
-## 20. Bước tiếp theo
+## 20. So sánh với plan cũ
 
-Thứ tự file nên bắt đầu viết:
+| Thành phần | Plan cũ (encrypted vault) | Plan mới (plaintext store) |
+|---|---|---|
+| `crypto.py` | Có Argon2id, AES-GCM, nonce, AAD | Bỏ hoàn toàn |
+| `vault_meta` | Có KDF salt/verifier | Bỏ hoàn toàn |
+| Master password | Có unlock/lock | Bỏ hoàn toàn |
+| Password trong DB | Ciphertext BLOB | `TEXT` plaintext |
+| TOTP/notes | Encrypted | Plaintext nếu giữ cột |
+| `vault_service.py` | Quản lý session key | Đổi tên `credential_service.py`, chỉ business logic |
+| Autofill | Cần vault unlocked | Query DB trực tiếp khi user chọn credential |
+| Rủi ro DB dump | Không đọc được password nếu không có master password | Đọc được toàn bộ password |
 
-1. `config.py`
-2. `db.py`
-3. `crypto.py` + test crypto
-4. MariaDB migration `001_initial_schema.sql`
-5. `vault_repo.py`
-6. `vault_service.py`
-7. CLI test ở `main.py`
-8. `autofill_matcher.py`
-9. Agent desktop/browser API
+---
 
-Bắt đầu từ `crypto.py` và test của nó trước. Nếu crypto layer sai, toàn bộ dữ liệu đã ghi xuống DB có thể không giải mã được về sau; còn UI/API/autofill có thể bổ sung sau mà không làm thay đổi format mã hóa.
+## 21. Bước tiếp theo
+
+Nên thực hiện theo thứ tự:
+
+1. Tạo MariaDB database và user quyền tối thiểu.
+2. Lưu schema ở mục 5 thành `migrations/001_initial_schema.sql`.
+3. Hoàn thiện `config.py` + `db.py` để chạy migration từ Python hoặc MariaDB CLI.
+4. Viết `validator.py`.
+5. Viết `credential_repo.py` với query summary khác query secret.
+6. Viết `credential_service.py`.
+7. Tạo CLI test CRUD trước khi làm UI/autofill agent.
+
+Điểm quan trọng trong phiên bản plaintext: dù không mã hóa, vẫn giữ nguyên kỷ luật module — đặc biệt tách `list_credential_summaries()` khỏi `get_autofill_payload()` — để password không bị select/serialize/log ngoài ý muốn.
