@@ -1,0 +1,5 @@
+"Trường","Kiểu","Mô tả"
+"kdf_salt","BLOB","Salt cho Argon2id derive key phiên"
+"kdf_params","JSON","Lưu memory_cost, time_cost, parallelism để dễ tăng độ khó về sau"
+"verifier_hash","BLOB","Hash dùng để xác minh master password đúng mà không lưu password"
+"schema_version","INT","Phục vụ migration khi bạn mở rộng schema sau này"
