@@ -1,148 +1,103 @@
 """
-SQLAlchemy ORM models cho Password Vault.
+SQLAlchemy ORM models cho Credential Store (plaintext).
 
-Các bảng:
-- vault_meta:       KDF params, salts, verifier (chỉ 1 row)
-- vault_items:      credentials + encrypted secret fields
-- autofill_rules:   rules để match target (domain, window title, ...)
-- password_history: password ciphertext cũ (tự lưu qua trigger)
-
-Quy tắc:
-- username là plaintext để hỗ trợ search/list nhanh.
-- password, totp_secret, notes đều là ciphertext (VARBINARY/BLOB).
-- Mỗi encrypted field có nonce riêng.
+Bảng:
+- credentials:       username/password/totp_secret/notes ở plaintext
+- autofill_rules:    rules để match target app/browser
+- password_history:  lịch sử password cũ (tùy chọn, tự thêm qua trigger)
 """
 
 from sqlalchemy import (
-    BLOB,
-    CHAR,
     JSON,
-    VARBINARY,
+    CHAR,
     Boolean,
-    CheckConstraint,
     Column,
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
-    SmallInteger,
     String,
+    Text,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
-# ── Base ──────────────────────────────────────────────────────
 class Base(DeclarativeBase):
-    """Base class cho tất cả ORM models."""
     pass
 
 
-# ── vault_meta ────────────────────────────────────────────────
-class VaultMeta(Base):
+# ── credentials ───────────────────────────────────────────────
+class Credential(Base):
     """
-    Thông tin derive key, chỉ có 1 row duy nhất (id = 1).
+    Bảng chính lưu thông tin đăng nhập.
 
-    Lưu KDF params (Argon2id), salt, và verifier hash
-    để xác nhận master password đúng khi unlock.
-    """
-
-    __tablename__ = "vault_meta"
-
-    id = Column(SmallInteger, primary_key=True, autoincrement=False)
-    kdf_algorithm = Column(String(32), nullable=False, server_default="argon2id")
-    kdf_salt = Column(VARBINARY(64), nullable=False)
-    kdf_memory_cost = Column(Integer, nullable=False)
-    kdf_time_cost = Column(Integer, nullable=False)
-    kdf_parallelism = Column(Integer, nullable=False)
-    verifier_hash = Column(VARBINARY(256), nullable=False)
-    verifier_salt = Column(VARBINARY(64), nullable=False)
-    schema_version = Column(Integer, nullable=False, server_default="1")
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(
-        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
-    )
-
-    __table_args__ = (
-        CheckConstraint("id = 1", name="ck_vault_meta_single_row"),
-    )
-
-
-# ── vault_items ───────────────────────────────────────────────
-class VaultItem(Base):
-    """
-    Bảng chính lưu credential.
-
-    - username: plaintext để search/list
-    - password_encrypted, totp_secret_encrypted, notes_encrypted: ciphertext AES-256-GCM
-    - Mỗi encrypted field đi kèm _nonce riêng
+    username và password đều ở dạng plaintext.
     """
 
-    __tablename__ = "vault_items"
+    __tablename__ = "credentials"
 
     id = Column(CHAR(36), primary_key=True)
     title = Column(String(255), nullable=False)
     platform_type = Column(
-        Enum("web", "desktop_app", "other", name="platform_type_enum"),
+        Enum("web", "desktop_app", "android_app", "other", name="platform_type_enum"),
         nullable=False,
     )
-    platform_identifier = Column(String(255))
+    platform_identifier = Column(String(512), nullable=True)
 
-    # Username: plaintext theo yêu cầu
-    username = Column(String(255), nullable=False)
+    username = Column(String(512), nullable=False)
+    password = Column(Text, nullable=False)
+    totp_secret = Column(String(512), nullable=True)
+    notes = Column(Text, nullable=True)
 
-    # Password: encrypted
-    password_encrypted = Column(VARBINARY(512), nullable=False)
-    password_nonce = Column(VARBINARY(32), nullable=False)
+    url = Column(String(2048), nullable=True)
+    tags = Column(JSON, nullable=True)
+    favorite = Column(Boolean, nullable=False, default=False)
 
-    # TOTP secret: encrypted (optional)
-    totp_secret_encrypted = Column(VARBINARY(512))
-    totp_secret_nonce = Column(VARBINARY(32))
-
-    # URL + Notes
-    url = Column(String(2048))
-    notes_encrypted = Column(BLOB)
-    notes_nonce = Column(VARBINARY(32))
-
-    # Metadata
-    tags = Column(JSON)
-    favorite = Column(Boolean, nullable=False, server_default="0")
-
-    # Timestamps
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(
-        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    created_at = Column(
+        DateTime(timezone=False), nullable=False, server_default=func.now()
     )
-    last_used_at = Column(DateTime, nullable=True)
+    updated_at = Column(
+        DateTime(timezone=False),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    last_used_at = Column(DateTime(timezone=False), nullable=True)
 
-    # Relationships
     autofill_rules = relationship(
-        "AutofillRule", back_populates="vault_item", cascade="all, delete-orphan"
+        "AutofillRule", back_populates="credential", cascade="all, delete-orphan"
     )
     password_history = relationship(
-        "PasswordHistory", back_populates="vault_item", cascade="all, delete-orphan"
+        "PasswordHistory", back_populates="credential", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("idx_credentials_platform", "platform_type", "platform_identifier"),
+        Index("idx_credentials_username", "username"),
+        Index("idx_credentials_title", "title"),
+        Index("idx_credentials_favorite", "favorite"),
     )
 
 
 # ── autofill_rules ────────────────────────────────────────────
 class AutofillRule(Base):
-    """
-    Quy tắc match để agent biết điền credential vào đâu.
-
-    Một vault_item có thể có nhiều rule (vd: vừa match domain vừa match window title).
-    """
+    """Quy tắc match để agent biết điền credential vào đâu."""
 
     __tablename__ = "autofill_rules"
 
     id = Column(CHAR(36), primary_key=True)
-    vault_item_id = Column(
+    credential_id = Column(
         CHAR(36),
-        ForeignKey("vault_items.id", ondelete="CASCADE"),
+        ForeignKey("credentials.id", ondelete="CASCADE"),
         nullable=False,
     )
     match_type = Column(
         Enum(
             "domain",
+            "exact_url",
+            "process_name",
             "window_title_regex",
             "android_package",
             "resource_id_hint",
@@ -150,48 +105,99 @@ class AutofillRule(Base):
         ),
         nullable=False,
     )
-    match_value = Column(String(512), nullable=False)
-    field_role = Column(
-        Enum("username", "password", "otp", name="field_role_enum"),
-        nullable=False,
-    )
-    priority = Column(Integer, nullable=False, server_default="0")
+    match_value = Column(String(2048), nullable=False)
+    priority = Column(Integer, nullable=False, default=0)
+    is_enabled = Column(Boolean, nullable=False, default=True)
 
-    vault_item = relationship("VaultItem", back_populates="autofill_rules")
+    created_at = Column(
+        DateTime(timezone=False), nullable=False, server_default=func.now()
+    )
+    updated_at = Column(
+        DateTime(timezone=False),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    credential = relationship("Credential", back_populates="autofill_rules")
+
+    __table_args__ = (
+        Index("idx_autofill_rules_match", "match_type", "match_value", mysql_length={"match_value": 255}),
+        Index("idx_autofill_rules_credential", "credential_id"),
+    )
 
 
 # ── password_history ──────────────────────────────────────────
 class PasswordHistory(Base):
     """
-    Lịch sử password cũ (ciphertext).
+    Lịch sử password cũ (plaintext).
 
-    Record được tạo tự động bởi MariaDB trigger khi password thay đổi.
+    Record được tạo tự động bởi trigger khi password thay đổi.
     """
 
     __tablename__ = "password_history"
 
     id = Column(CHAR(36), primary_key=True)
-    vault_item_id = Column(
+    credential_id = Column(
         CHAR(36),
-        ForeignKey("vault_items.id", ondelete="CASCADE"),
+        ForeignKey("credentials.id", ondelete="CASCADE"),
         nullable=False,
     )
-    password_encrypted = Column(VARBINARY(512), nullable=False)
-    password_nonce = Column(VARBINARY(32), nullable=False)
-    changed_at = Column(DateTime, nullable=False, server_default=func.now())
+    password = Column(Text, nullable=False)
+    changed_at = Column(
+        DateTime(timezone=False), nullable=False, server_default=func.now()
+    )
 
-    vault_item = relationship("VaultItem", back_populates="password_history")
+    credential = relationship("Credential", back_populates="password_history")
+
+    __table_args__ = (
+        Index("idx_password_history_credential", "credential_id", "changed_at"),
+    )
 
 
-# ── Trigger SQL (chạy riêng bằng raw SQL sau khi tạo tables) ─
+# ── error_logs ────────────────────────────────────────────────
+class ErrorLog(Base):
+    """Ghi lại các sự kiện lỗi/audit trong hệ thống."""
+
+    __tablename__ = "error_logs"
+
+    id = Column(CHAR(36), primary_key=True)
+    event_type = Column(String(64), nullable=False)
+    object_id = Column(CHAR(36), nullable=True)
+    message = Column(Text, nullable=False)
+    created_at = Column(
+        DateTime(timezone=False), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_error_logs_event", "event_type", "object_id"),
+    )
+
+
+class InforLog(Base):
+    __tablename__ = "infor_logs"
+
+    id = Column(CHAR(36), primary_key=True)
+    event_type = Column(String(64), nullable=False)
+    object_id = Column(CHAR(36), nullable=True)
+    message = Column(Text, nullable=False)
+    created_at = Column(
+        DateTime(timezone=False), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_infor_logs_event", "event_type", "object_id"),
+    )
+
+# ── Trigger SQL (chạy riêng sau khi tạo tables) ───────────────
 TRIGGER_PASSWORD_HISTORY_SQL = """\
-CREATE TRIGGER IF NOT EXISTS trg_vault_items_password_history
-AFTER UPDATE ON vault_items
+CREATE TRIGGER IF NOT EXISTS trg_credentials_password_history
+BEFORE UPDATE ON credentials
 FOR EACH ROW
 BEGIN
-    IF NOT (OLD.password_encrypted <=> NEW.password_encrypted) THEN
-        INSERT INTO password_history (id, vault_item_id, password_encrypted, password_nonce, changed_at)
-        VALUES (UUID(), OLD.id, OLD.password_encrypted, OLD.password_nonce, CURRENT_TIMESTAMP);
+    IF NOT (OLD.password <=> NEW.password) THEN
+        INSERT INTO password_history (id, credential_id, password, changed_at)
+        VALUES (UUID(), OLD.id, OLD.password, CURRENT_TIMESTAMP(6));
     END IF;
 END
 """
