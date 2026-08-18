@@ -11,9 +11,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import select
+
 from app.db import get_session, transaction
-from app.models import Credential
-from app.controller.validator import validate_credential
+from app.models import AutofillRule, Credential, PasswordHistory
+from app.controller.validator import validate_credential, validate_rule_input
 from app.controller.log import Log_Record as log
 
 
@@ -61,7 +63,6 @@ def insert_credential(data: dict) -> str:
 
     try:
         with transaction() as session:
-            session.get(Credential, )
             credential = Credential(
                 id=newId,
                 title=validated["title"],
@@ -85,10 +86,9 @@ def insert_credential(data: dict) -> str:
         raise
     return new_id
 
-def update_credential(data: dict)  -> str:
-
+def update_credential_metadata(credentialId: str, data: dict)  -> str:
+    validated = validate_credential({**data, "id": credentialId})
     try:
-        credentialId = data["id"]
         with transaction() as session:
             credential = session.get(Credential, credentialId)
             if not credential:
@@ -98,7 +98,6 @@ def update_credential(data: dict)  -> str:
             credential.platform_type = validated["platform_type"]
             credential.platform_identifier = validated.get("platform_identifier")
             credential.username = validated["username"]
-            credential.password = validated["password"]
             credential.totp_secret = validated.get("totp_secret")
             credential.notes = validated.get("notes")
             credential.url = validated.get("url")
@@ -116,7 +115,33 @@ def update_credential(data: dict)  -> str:
         raise
     return f"Update successfully: {credentialId}"
 
-def read_one_credential(credentialId: str) -> str:
+def update_credential_password(credentialId: str, new_password: str) -> str:
+    """
+    Đổi password.
+    Trigger trg_credentials_password_history sẽ tự động lưu
+    password CŨ vào bảng password_history trước khi UPDATE.
+    """
+    if not new_password or not new_password.strip():
+        raise ValueError("new_password không được rỗng")
+    try:
+        with transaction() as session:
+            credential = session.get(Credential, credentialId)
+            if not credential:
+                raise ValueError(f"Không tìm thấy credential: {credentialId}")
+            # Gán password mới → SQLAlchemy UPDATE → trigger tự chạy
+            credential.password = new_password
+    except ValueError:
+        raise
+    except Exception as exc:
+        log.log_error(
+            event_type="db_error",
+            message=f"update_credential_password failed: {exc}",
+            object_id=credentialId,
+        )
+        raise
+    return f"Password updated: {credentialId}"
+
+def read_one_credential(credentialId: str) -> dict:
     try:
         with transaction() as session:
             results = session.scalars(
@@ -192,7 +217,61 @@ def delete_credential(credentialId : str) -> str:
         raise
     return f"Delete successfully: {credentialId}"
 
-    
+def list_password_history(credentialId: str) -> list[PasswordHistory]:
+    """Xem lịch sử password cũ của 1 credential, mới nhất trước."""
+    try:
+        with get_session() as session:
+            return session.scalars(
+                select(PasswordHistory)
+                .where(PasswordHistory.credential_id == credentialId)
+                .order_by(PasswordHistory.changed_at.desc())
+            ).all()
+    except Exception as exc:
+        log.log_error(
+            event_type="db_error",
+            message=f"list_password_history failed: {exc}",
+            object_id=credentialId,
+        )
+        raise
 
 
-
+def create_credential_with_rules(data: dict, rules: list[dict]) -> str:
+    """Tạo credential + rules trong 1 transaction duy nhất."""
+    newId = str(uuid.uuid4())
+    validated = validate_credential({"id": newId, **data})
+    try:
+        with transaction() as session:
+            credential = Credential(
+                id=newId,
+                title=validated["title"],
+                platform_type=validated["platform_type"],
+                platform_identifier=validated.get("platform_identifier"),
+                username=validated["username"],
+                password=validated["password"],
+                totp_secret=validated.get("totp_secret"),
+                notes=validated.get("notes"),
+                url=validated.get("url"),
+                tags=validated.get("tags", []),
+                favorite=bool(validated.get("favorite", False)),
+            )
+            session.add(credential)
+            for rule in rules:
+                validated_rule = validate_rule_input({**rule, "id": str(uuid.uuid4())})
+                session.add(AutofillRule(
+                    credential_id=newId,
+                    **validated_rule,
+                    is_enabled=True
+                ))
+            log.infor(
+                event_type = "create credential with rule",
+                message = f"create_credential_with_rules success: {credential.title}",
+                object_id = newId
+            )
+    except Exception as exc:
+        log.log_error(
+            event_type="db_error",
+            message=f"create_credential_with_rules failed: {exc}",
+            object_id=newId,
+        )
+        raise
+    return newId    
