@@ -56,7 +56,7 @@ def insert_credential(data: dict) -> str:
     """
     # Gán id mới trước khi validate để log_error có thể ghi object_id
     newId = str(uuid.uuid4())
-    data = {"id": new_id, **data}
+    data = {"id": newId, **data}
 
     # Validate và chuẩn hoá dữ liệu đầu vào
     validated = validate_credential(data)
@@ -81,10 +81,10 @@ def insert_credential(data: dict) -> str:
         log.log_error(
             event_type="db_error",
             message=f"insert_credential failed: {exc}",
-            object_id=new_id,
+            object_id=newId,
         )
         raise
-    return new_id
+    return newId
 
 def update_credential_metadata(credentialId: str, data: dict)  -> str:
     validated = validate_credential({**data, "id": credentialId})

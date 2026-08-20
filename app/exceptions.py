@@ -1,41 +1,35 @@
 """
-Exception nghiệp vụ cho Password Vault.
+Exception nghiệp vụ cho Credential Store (plaintext).
 
 Tập trung exception để API/UI xử lý nhất quán,
-không expose lỗi DB/crypto thô cho frontend.
+không expose lỗi DB thô cho frontend.
 """
 
 
-class VaultError(Exception):
-    """Base exception cho tất cả lỗi vault."""
+class CredentialStoreError(Exception):
+    """Base exception cho tất cả lỗi credential store."""
     pass
 
 
-class VaultNotInitializedError(VaultError):
-    """Vault chưa được khởi tạo (chưa có vault_meta)."""
-    pass
+# Backward compatibility alias
+VaultError = CredentialStoreError
 
 
-class VaultLockedError(VaultError):
-    """Vault đang bị khóa, cần unlock trước khi truy cập secret."""
-    pass
-
-
-class InvalidMasterPasswordError(VaultError):
-    """Master password không đúng."""
-    pass
-
-
-class CredentialNotFoundError(VaultError):
+class CredentialNotFoundError(CredentialStoreError):
     """Credential với ID chỉ định không tồn tại."""
     pass
 
 
-class DuplicateAutofillRuleError(VaultError):
+class ValidationError(CredentialStoreError):
+    """Dữ liệu đầu vào không hợp lệ."""
+    pass
+
+
+class DuplicateAutofillRuleError(CredentialStoreError):
     """Autofill rule đã tồn tại cho item + match_type + match_value."""
     pass
 
 
-class VaultIntegrityError(VaultError):
-    """Ciphertext không xác thực được hoặc record có cấu trúc sai."""
+class LocalApiUnauthorizedError(CredentialStoreError):
+    """Request tới local API không có token hợp lệ."""
     pass

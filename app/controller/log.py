@@ -13,7 +13,7 @@ from typing import Optional
 from sqlalchemy import select
 
 from app.db import get_session, transaction
-from app.models import ErrorLog
+from app.models import ErrorLog, InforLog
 
 
 class Log_Record:
