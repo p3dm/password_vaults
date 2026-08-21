@@ -5,17 +5,17 @@ Ràng buộc:
 - Bind 127.0.0.1 only (không expose ra LAN/Internet).
 - Header X-Local-Token bắt buộc cho mọi request.
 - Không log request/response body chứa password.
-- Password chỉ trả ở endpoint autofill payload (POST /v1/autofill/payload).
+- Password chỉ trả ở endpoint autofill payload (POST /api/autofill/payload).
 
 Endpoint:
-    GET    /v1/credentials              — List/search credential (không password)
-    POST   /v1/credentials              — Tạo credential mới
-    GET    /v1/credentials/<id>         — Xem metadata (không password)
-    PATCH  /v1/credentials/<id>         — Update metadata/password
-    DELETE /v1/credentials/<id>         — Xóa credential
-    POST   /v1/credentials-with-rules   — Tạo credential + autofill rules
-    POST   /v1/autofill/candidates      — Tìm candidate (không password)
-    POST   /v1/autofill/payload         — Lấy username+password để autofill
+    GET    /api/credentials              — List/search credential (không password)
+    POST   /api/credentials              — Tạo credential mới
+    GET    /api/credentials/<id>         — Xem metadata (không password)
+    PATCH  /api/credentials/<id>         — Update metadata/password
+    DELETE /api/credentials/<id>         — Xóa credential
+    POST   /api/credentials-with-rules   — Tạo credential + autofill rules
+    POST   /api/autofill/candidates      — Tìm candidate (không password)
+    POST   /api/autofill/payload         — Lấy username+password để autofill
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ def _rule_to_dict(rule) -> dict:
 @api_bp.route("/credentials", methods=["GET"])
 def list_credentials():
     """
-    GET /v1/credentials
+    GET /api/credentials
     List tất cả credential (summary, KHÔNG password).
     """
     results = read_all_credential()
@@ -149,7 +149,7 @@ def list_credentials():
 @api_bp.route("/credentials", methods=["POST"])
 def create_credential():
     """
-    POST /v1/credentials
+    POST /api/credentials
     Tạo credential mới.
 
     Body JSON:
@@ -182,7 +182,7 @@ def create_credential():
 @api_bp.route("/credentials/<credential_id>", methods=["GET"])
 def get_credential(credential_id: str):
     """
-    GET /v1/credentials/<id>
+    GET /api/credentials/<id>
     Xem metadata credential (KHÔNG password).
     """
     cred = read_one_credential(credential_id)
@@ -192,7 +192,7 @@ def get_credential(credential_id: str):
 @api_bp.route("/credentials/<credential_id>", methods=["PATCH"])
 def update_credential(credential_id: str):
     """
-    PATCH /v1/credentials/<id>
+    PATCH /api/credentials/<id>
     Update metadata và/hoặc password.
 
     Body JSON (gửi field cần update):
@@ -235,7 +235,7 @@ def update_credential(credential_id: str):
 @api_bp.route("/credentials/<credential_id>", methods=["DELETE"])
 def remove_credential(credential_id: str):
     """
-    DELETE /v1/credentials/<id>
+    DELETE /api/credentials/<id>
     Xóa credential (cascade xóa rules + history).
     """
     result = delete_credential(credential_id)
@@ -251,7 +251,7 @@ def remove_credential(credential_id: str):
 @api_bp.route("/credentials-with-rules", methods=["POST"])
 def create_credential_with_rules_endpoint():
     """
-    POST /v1/credentials-with-rules
+    POST /api/credentials-with-rules
     Tạo credential + autofill rules trong 1 transaction.
 
     Body JSON:
@@ -302,7 +302,7 @@ def create_credential_with_rules_endpoint():
 
 @api_bp.route("/credentials/<credential_id>/rules", methods=["GET"])
 def get_rules(credential_id: str):
-    """GET /v1/credentials/<id>/rules — List autofill rules cho 1 credential."""
+    """GET /api/credentials/<id>/rules — List autofill rules cho 1 credential."""
     rules = list_autofill_rules(credential_id)
     return jsonify({
         "data": [_rule_to_dict(r) for r in rules],
@@ -313,7 +313,7 @@ def get_rules(credential_id: str):
 @api_bp.route("/credentials/<credential_id>/rules", methods=["POST"])
 def create_rule(credential_id: str):
     """
-    POST /v1/credentials/<id>/rules — Thêm autofill rule.
+    POST /api/credentials/<id>/rules — Thêm autofill rule.
 
     Body JSON:
     {
@@ -333,7 +333,7 @@ def create_rule(credential_id: str):
 
 @api_bp.route("/rules/<rule_id>", methods=["PATCH"])
 def modify_rule(rule_id: str):
-    """PATCH /v1/rules/<id> — Update autofill rule."""
+    """PATCH /api/rules/<id> — Update autofill rule."""
     body = request.get_json(force=True)
     if not body:
         return jsonify({"error": "Bad Request", "message": "Body JSON không được rỗng"}), 400
@@ -344,7 +344,7 @@ def modify_rule(rule_id: str):
 
 @api_bp.route("/rules/<rule_id>", methods=["DELETE"])
 def remove_rule(rule_id: str):
-    """DELETE /v1/rules/<id> — Xóa autofill rule."""
+    """DELETE /api/rules/<id> — Xóa autofill rule."""
     result = delete_autofill_rule(rule_id)
     return jsonify({"message": result})
 
@@ -357,7 +357,7 @@ def remove_rule(rule_id: str):
 @api_bp.route("/autofill/candidates", methods=["POST"])
 def find_autofill_candidates():
     """
-    POST /v1/autofill/candidates
+    POST /api/autofill/candidates
     Tìm credential candidate phù hợp (KHÔNG password).
 
     Body JSON:
@@ -400,7 +400,7 @@ def find_autofill_candidates():
 @api_bp.route("/autofill/payload", methods=["POST"])
 def get_autofill_payload():
     """
-    POST /v1/autofill/payload
+    POST /api/autofill/payload
     Lấy username + password để autofill (CHỈ cho credential đã chọn).
 
     Body JSON:

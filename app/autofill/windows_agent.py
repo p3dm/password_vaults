@@ -37,7 +37,8 @@ from app.credential_service import CredentialService
 logger = logging.getLogger(__name__)
 
 # ── Cấu hình mặc định ────────────────────────────────────────
-DEFAULT_HOTKEY = "ctrl+f1"
+AUTO_HOTKEY = "ctrl+f1"
+SAVE_HOTKEY = "enter"
 FILL_DELAY_SEC = 0.3           # Delay giữa username và password
 CLIPBOARD_CLEAR_DELAY = 2.0    # Xóa clipboard sau N giây
 TYPE_PASTE_DELAY = 0.05        # Delay nhỏ sau mỗi Ctrl+V
@@ -54,11 +55,16 @@ class WindowsAdapter:
         agent.stop()      # hủy hotkey, cleanup
     """
 
-    def __init__(self, hotkey: str = DEFAULT_HOTKEY):
-        self._hotkey = hotkey
+    def __init__(self, auto_hotkey: str | None = None, save_hotkey: str | None = None):
         self._running = False
         self._service = CredentialService()
         self._target_hwnd: int | None = None  # handle window mục tiêu khi chọn candidate
+        self._hotkey_map = {
+            auto_hotkey: self._on_hotkey,
+            save_hotkey: self._on_save,
+            generate_hotkey: self._on_generate_password,  # Chức năng mới
+        }
+
 
     # ── Lifecycle ─────────────────────────────────────────────
 
@@ -67,10 +73,12 @@ class WindowsAdapter:
         if self._running:
             logger.warning("WindowsAdapter đã đang chạy.")
             return
-
-        keyboard.add_hotkey(self._hotkey, self._on_hotkey, suppress=True)
+        for hotkey, callback in self._hotkey_map.items():
+            if hotkey:
+                # suppress=True để chặn phím tắt không ăn vào ứng dụng bên dưới
+                keyboard.add_hotkey(hotkey, callback, suppress=True)
         self._running = True
-        logger.info("WindowsAdapter started — hotkey: %s", self._hotkey)
+        logger.info("WindowsAdapter started — hotkey: %s", self._hotkey_map.keys())
 
     def stop(self) -> None:
         """Hủy hotkey và cleanup."""
@@ -78,7 +86,9 @@ class WindowsAdapter:
             return
 
         try:
-            keyboard.remove_hotkey(self._hotkey)
+            for hotkey in self._hotkey_map.keys():
+                if hotkey:
+                    keyboard.remove_hotkey(hotkey)
         except (KeyError, ValueError):
             pass  # hotkey đã bị hủy hoặc không tồn tại
 
@@ -370,6 +380,14 @@ class WindowsAdapter:
             if payload:
                 payload.clear()
             payload = None
+    
+    def _execute_save(self, credential: dict) -> None:
+        try:
+            self._service.save_password(credential)
+            self._show_notification("Save password thành công")
+        except Exception as e:
+            logger.error("Save password thất bại: %s", e, exc_info=True)
+            self._show_notification(f"Save password thất bại: {e}")
 
     # ── Notification helper ───────────────────────────────────
 

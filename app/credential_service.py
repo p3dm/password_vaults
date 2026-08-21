@@ -19,6 +19,8 @@ from app.db import get_session, transaction
 from app.models import Credential
 from app.exceptions import CredentialNotFoundError
 from app.autofill_matcher import AutofillContext, find_candidates as matcher_find
+from app.controller.credential import insert_credential
+from app.controller.autofill_rule import auto_create_rule
 from app.controller.log import Log_Record as log
 
 logger = logging.getLogger(__name__)
@@ -83,3 +85,29 @@ class CredentialService:
                 object_id=credential_id,
             )
             raise
+
+    @staticmethod
+    def save_password(credential: dict) -> None:
+        try:
+            credentialId = credential.get("credential_id")
+            with transaction() as session:
+                existCrendential = session.scalars(
+                    select(Credential)
+                .where(Credential.id == credentialId)
+                ).all()
+                if existCrendential:
+                    return
+                else:
+                    newCredentialId = insert_credential(credential)
+                    credential = read_one_credential(newCredentialId)
+
+        except Exception as exc:
+            log.log_error(
+                event_type="db_error",
+                message=f"save_password failed: {exc}",
+                object_id=credential.get("credential_id"),
+            )
+            raise
+                
+
+
