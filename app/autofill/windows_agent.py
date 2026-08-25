@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 # ── Cấu hình mặc định ────────────────────────────────────────
 AUTO_HOTKEY = "ctrl+f1"
-SAVE_HOTKEY = "enter"
+SAVE_HOTKEY = "ctrl+f2"
 FILL_DELAY_SEC = 0.3           # Delay giữa username và password
 CLIPBOARD_CLEAR_DELAY = 2.0    # Xóa clipboard sau N giây
 TYPE_PASTE_DELAY = 0.05        # Delay nhỏ sau mỗi Ctrl+V
@@ -55,15 +55,16 @@ class WindowsAdapter:
         agent.stop()      # hủy hotkey, cleanup
     """
 
-    def __init__(self, auto_hotkey: str | None = None, save_hotkey: str | None = None):
+    def __init__(
+        self,
+        auto_hotkey: str | None = None,
+        save_hotkey: str | None = None,
+    ):
         self._running = False
         self._service = CredentialService()
         self._target_hwnd: int | None = None  # handle window mục tiêu khi chọn candidate
-        self._hotkey_map = {
-            auto_hotkey: self._on_hotkey,
-            save_hotkey: self._on_save,
-            generate_hotkey: self._on_generate_password,  # Chức năng mới
-        }
+        self._auto_hotkey = auto_hotkey or AUTO_HOTKEY
+        self._save_hotkey = save_hotkey or SAVE_HOTKEY
 
 
     # ── Lifecycle ─────────────────────────────────────────────
@@ -73,24 +74,27 @@ class WindowsAdapter:
         if self._running:
             logger.warning("WindowsAdapter đã đang chạy.")
             return
-        for hotkey, callback in self._hotkey_map.items():
-            if hotkey:
-                # suppress=True để chặn phím tắt không ăn vào ứng dụng bên dưới
-                keyboard.add_hotkey(hotkey, callback, suppress=True)
+
+        keyboard.add_hotkey(self._auto_hotkey, self._on_hotkey, suppress=True)
+        keyboard.add_hotkey(self._save_hotkey, self._on_save, suppress=True)
+
         self._running = True
-        logger.info("WindowsAdapter started — hotkey: %s", self._hotkey_map.keys())
+        logger.info(
+            "WindowsAdapter started — autofill: %s, save: %s",
+            self._auto_hotkey,
+            self._save_hotkey,
+        )
 
     def stop(self) -> None:
         """Hủy hotkey và cleanup."""
         if not self._running:
             return
 
-        try:
-            for hotkey in self._hotkey_map.keys():
-                if hotkey:
-                    keyboard.remove_hotkey(hotkey)
-        except (KeyError, ValueError):
-            pass  # hotkey đã bị hủy hoặc không tồn tại
+        for hk in (self._auto_hotkey, self._save_hotkey):
+            try:
+                keyboard.remove_hotkey(hk)
+            except (KeyError, ValueError):
+                pass  # hotkey đã bị hủy hoặc không tồn tại
 
         self._running = False
         logger.info("WindowsAdapter stopped.")
@@ -381,13 +385,233 @@ class WindowsAdapter:
                 payload.clear()
             payload = None
     
-    def _execute_save(self, credential: dict) -> None:
+    # ── Save password hotkey callback ──────────────────────────
+
+    def _on_save(self) -> None:
+        """
+        Callback khi user nhấn save hotkey.
+
+        Luồng:
+        1. Lưu handle của target window.
+        2. Lấy context (process_name, window_title).
+        3. Hiện popup form để user nhập thông tin credential.
+        4. Gọi service.save_password() với credential + context.
+        """
         try:
-            self._service.save_password(credential)
-            self._show_notification("Save password thành công")
+            self._target_hwnd = win32gui.GetForegroundWindow()
+            self._save_context = self.get_context()
+            logger.info(
+                "Save hotkey triggered — process: %s, window: %s",
+                self._save_context.process_name,
+                self._save_context.window_title,
+            )
+            self._show_save_popup()
+        except Exception as e:
+            logger.error("Lỗi trong _on_save: %s", e, exc_info=True)
+            self._show_notification(f"Lỗi save password: {e}")
+
+    def _show_save_popup(self) -> None:
+        """
+        Hiển thị popup tkinter để user nhập thông tin credential cần lưu.
+
+        Form gồm: title, username, password, platform_type.
+        Sau khi submit → gọi _execute_save().
+        """
+        context = self._save_context
+
+        def _run_popup():
+            root = tk.Tk()
+            root.title("Lưu Credential — Password Vault")
+            root.attributes("-topmost", True)
+            root.resizable(False, False)
+
+            # ── Style ──────────────────────────────────────
+            style = ttk.Style(root)
+            style.theme_use("clam")
+            root.configure(bg="#1e1e2e")
+
+            style.configure("Save.TFrame", background="#1e1e2e")
+            style.configure(
+                "Save.TLabel",
+                background="#1e1e2e",
+                foreground="#cdd6f4",
+                font=("Segoe UI", 10),
+            )
+            style.configure(
+                "SaveTitle.TLabel",
+                background="#1e1e2e",
+                foreground="#cdd6f4",
+                font=("Segoe UI", 12, "bold"),
+            )
+            style.configure(
+                "Save.TEntry",
+                fieldbackground="#313244",
+                foreground="#cdd6f4",
+                font=("Segoe UI", 10),
+            )
+            style.configure(
+                "Save.TButton",
+                background="#89b4fa",
+                foreground="#1e1e2e",
+                font=("Segoe UI", 10, "bold"),
+                padding=(12, 6),
+            )
+            style.map(
+                "Save.TButton",
+                background=[("active", "#74c7ec")],
+            )
+            style.configure(
+                "Cancel.TButton",
+                background="#45475a",
+                foreground="#cdd6f4",
+                font=("Segoe UI", 10),
+                padding=(12, 6),
+            )
+            style.map(
+                "Cancel.TButton",
+                background=[("active", "#585b70")],
+            )
+
+            # ── Frame chính ────────────────────────────────
+            main_frame = ttk.Frame(root, style="Save.TFrame", padding=20)
+            main_frame.pack(fill=tk.BOTH, expand=True)
+
+            ttk.Label(
+                main_frame,
+                text="💾  Lưu credential mới",
+                style="SaveTitle.TLabel",
+            ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 12))
+
+            # Hiển thị context info
+            context_text = context.process_name or context.window_title or "N/A"
+            ttk.Label(
+                main_frame,
+                text=f"Target: {context_text}",
+                style="Save.TLabel",
+            ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
+
+            # ── Form fields ────────────────────────────────
+            fields = {}
+            field_defs = [
+                ("title", "Tiêu đề", context.process_name or ""),
+                ("username", "Username", ""),
+                ("password", "Password", ""),
+            ]
+
+            for i, (key, label_text, default) in enumerate(field_defs, start=2):
+                ttk.Label(
+                    main_frame, text=label_text, style="Save.TLabel"
+                ).grid(row=i, column=0, sticky=tk.W, pady=4, padx=(0, 12))
+
+                entry = ttk.Entry(main_frame, width=35, style="Save.TEntry")
+                if key == "password":
+                    entry.configure(show="•")
+                if default:
+                    entry.insert(0, default)
+                entry.grid(row=i, column=1, sticky=tk.EW, pady=4)
+                fields[key] = entry
+
+            # Platform type
+            row_platform = len(field_defs) + 2
+            ttk.Label(
+                main_frame, text="Loại nền tảng", style="Save.TLabel"
+            ).grid(row=row_platform, column=0, sticky=tk.W, pady=4, padx=(0, 12))
+
+            platform_combo = ttk.Combobox(
+                main_frame,
+                values=["web", "desktop_app", "other"],
+                state="readonly",
+                width=32,
+            )
+            platform_combo.set("desktop_app")
+            platform_combo.grid(row=row_platform, column=1, sticky=tk.EW, pady=4)
+
+            # Error message label
+            error_label = ttk.Label(
+                main_frame,
+                text="",
+                foreground="#f38ba8",
+                background="#1e1e2e",
+                font=("Segoe UI", 9),
+            )
+            error_label.grid(row=row_platform + 1, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
+
+            # ── Buttons ────────────────────────────────────
+            btn_frame = ttk.Frame(main_frame, style="Save.TFrame")
+            btn_frame.grid(
+                row=row_platform + 2, column=0, columnspan=2,
+                sticky=tk.E, pady=(12, 0),
+            )
+
+            def _on_submit(event=None):
+                credential = {
+                    "title": fields["title"].get().strip(),
+                    "username": fields["username"].get().strip(),
+                    "password": fields["password"].get(),
+                    "platform_type": platform_combo.get(),
+                    "platform_identifier": context.process_name,
+                }
+
+                if not credential["title"] or not credential["username"] or not credential["password"]:
+                    error_label.config(text="Vui lòng điền đầy đủ thông tin.")
+                    return
+
+                root.destroy()
+                self._execute_save(credential)
+
+            def _on_cancel(event=None):
+                root.destroy()
+
+            ttk.Button(
+                btn_frame, text="Hủy", style="Cancel.TButton", command=_on_cancel
+            ).pack(side=tk.LEFT, padx=(0, 8))
+            ttk.Button(
+                btn_frame, text="Lưu", style="Save.TButton", command=_on_submit
+            ).pack(side=tk.LEFT)
+
+            root.bind("<Return>", _on_submit)
+            root.bind("<Escape>", _on_cancel)
+
+            # Đặt popup giữa màn hình
+            root.update_idletasks()
+            w = root.winfo_width()
+            h = root.winfo_height()
+            x = (root.winfo_screenwidth() // 2) - (w // 2)
+            y = (root.winfo_screenheight() // 2) - (h // 2)
+            root.geometry(f"+{x}+{y}")
+
+            # Focus vào field đầu tiên
+            fields["title"].focus_set()
+            root.mainloop()
+
+        popup_thread = threading.Thread(target=_run_popup, daemon=True)
+        popup_thread.start()
+
+    def _execute_save(self, credential: dict) -> None:
+        """
+        Thực hiện lưu credential + autofill rules.
+
+        Luồng:
+        1. Gọi service.save_password() với credential + context đã lưu.
+        2. Hiển thị notification kết quả.
+        """
+        try:
+            context = getattr(self, "_save_context", None)
+            if not context:
+                logger.error("Không có context để save")
+                self._show_notification(
+                    "Save password thất bại: không xác định được target window"
+                )
+                return
+
+            self._service.save_password(credential, context)
+            self._show_notification("Save password thành công! ✅")
+            logger.info("Save password thành công: %s", credential.get("title"))
         except Exception as e:
             logger.error("Save password thất bại: %s", e, exc_info=True)
             self._show_notification(f"Save password thất bại: {e}")
+        finally:
+            self._save_context = None
 
     # ── Notification helper ───────────────────────────────────
 

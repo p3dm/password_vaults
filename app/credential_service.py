@@ -18,9 +18,9 @@ from sqlalchemy import select
 from app.db import get_session, transaction
 from app.models import Credential
 from app.exceptions import CredentialNotFoundError
-from app.autofill_matcher import AutofillContext, find_candidates as matcher_find
-from app.controller.credential import insert_credential
-from app.controller.autofill_rule import auto_create_rule
+from app.autofill_matcher import AutofillContext, find_candidates as matcher_find, build_match_request
+from app.controller.credential import insert_credential, read_one_credential
+from app.controller.autofill_rule import add_autofill_rule
 from app.controller.log import Log_Record as log
 
 logger = logging.getLogger(__name__)
@@ -87,19 +87,41 @@ class CredentialService:
             raise
 
     @staticmethod
-    def save_password(credential: dict) -> None:
+    def save_password(credential: dict, context: AutofillContext) -> str | None:
+        """
+        Lưu credential mới + tạo autofill rules từ context.
+
+        Luồng:
+        1. Kiểm tra credential đã tồn tại chưa (theo credential_id nếu có).
+        2. Insert credential mới.
+        3. Build match requests từ context → tạo autofill rule cho mỗi match.
+        4. Return newCredentialId nếu thành công, None nếu đã tồn tại.
+        """
         try:
             credentialId = credential.get("credential_id")
-            with transaction() as session:
-                existCrendential = session.scalars(
-                    select(Credential)
-                .where(Credential.id == credentialId)
-                ).all()
-                if existCrendential:
-                    return
-                else:
-                    newCredentialId = insert_credential(credential)
-                    credential = read_one_credential(newCredentialId)
+
+            # Kiểm tra trùng — chỉ check, không insert trong transaction này
+            if credentialId:
+                with get_session() as session:
+                    existing = session.scalars(
+                        select(Credential).where(Credential.id == credentialId)
+                    ).first()
+                    if existing:
+                        logger.info("Credential đã tồn tại: %s", credentialId)
+                        return None
+            newCredentialId = insert_credential(credential)
+
+            match_requests = build_match_request(context)
+            for match_type, match_value in match_requests:
+                rule = {"match_type": match_type, "match_value": match_value}
+                add_autofill_rule(newCredentialId, rule)
+
+            log.log_infor(
+                event_type="SAVE_PASSWORD",
+                message=f"Save password for credential: {newCredentialId}",
+                object_id=newCredentialId,
+            )
+            return newCredentialId
 
         except Exception as exc:
             log.log_error(
