@@ -1,6 +1,9 @@
 # Created by https://www.toptal.com/developers/gitignore/api/python,venv,dotenv
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,venv,dotenv
 
+### node_modules ###
+node_modules/
+
 ### dotenv ###
 .env
 

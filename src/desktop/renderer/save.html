@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+  <title>Save Credential — Password Vault</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      padding: 20px;
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+    h2 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .context-info {
+      font-size: 12px;
+      color: #6c7086;
+      margin-bottom: 16px;
+    }
+    .form-group {
+      margin-bottom: 12px;
+      -webkit-app-region: no-drag;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      margin-bottom: 4px;
+      color: #a6adc8;
+    }
+    input, select {
+      width: 100%;
+      padding: 8px 10px;
+      background: #313244;
+      color: #cdd6f4;
+      border: 1px solid #45475a;
+      border-radius: 6px;
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus, select:focus {
+      border-color: #89b4fa;
+    }
+    .error {
+      color: #f38ba8;
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    .buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 16px;
+      -webkit-app-region: no-drag;
+    }
+    button {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-save {
+      background: #89b4fa;
+      color: #1e1e2e;
+    }
+    .btn-save:hover { background: #74c7ec; }
+    .btn-cancel {
+      background: #45475a;
+      color: #cdd6f4;
+    }
+    .btn-cancel:hover { background: #585b70; }
+  </style>
+</head>
+<body>
+  <h2>💾 Save new credential</h2>
+  <div class="context-info" id="contextInfo">Target: N/A</div>
+
+  <div class="form-group">
+    <label for="title">Title</label>
+    <input type="text" id="title" placeholder="e.g. Riot Games" autofocus>
+  </div>
+  <div class="form-group">
+    <label for="username">Username</label>
+    <input type="text" id="username" placeholder="Username or email">
+  </div>
+  <div class="form-group">
+    <label for="password">Password</label>
+    <input type="password" id="password" placeholder="Password">
+  </div>
+  <div class="form-group">
+    <label for="platformType">Platform Type</label>
+    <select id="platformType">
+      <option value="desktop_app">Desktop App</option>
+      <option value="web">Web</option>
+      <option value="other">Other</option>
+    </select>
+  </div>
+
+  <div class="error" id="errorMsg"></div>
+
+  <div class="buttons">
+    <button class="btn-cancel" id="btnCancel">Cancel</button>
+    <button class="btn-save" id="btnSave">Save</button>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const opId = params.get('operationId');
+
+    document.getElementById('btnSave').addEventListener('click', submit);
+    document.getElementById('btnCancel').addEventListener('click', cancel);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') cancel();
+      if (e.key === 'Enter') submit();
+    });
+
+    async function submit() {
+      const title = document.getElementById('title').value.trim();
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+      const platformType = document.getElementById('platformType').value;
+
+      if (!title || !username || !password) {
+        document.getElementById('errorMsg').textContent =
+          'Please fill in all required fields.';
+        return;
+      }
+
+      const result = await window.vault.saveCredential(opId, {
+        title,
+        username,
+        password,
+        platformType,
+      });
+
+      if (result.success) {
+        window.close();
+      } else {
+        document.getElementById('errorMsg').textContent =
+          result.message || 'Save failed';
+      }
+    }
+
+    function cancel() {
+      if (opId) window.vault.cancelOperation(opId);
+      window.close();
+    }
+  </script>
+</body>
+</html>

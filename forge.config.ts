@@ -1,0 +1,59 @@
+import type { ForgeConfig } from '@electron-forge/shared-types';
+import { MakerSquirrel } from '@electron-forge/maker-squirrel';
+import { MakerZIP } from '@electron-forge/maker-zip';
+import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
+import { WebpackPlugin } from '@electron-forge/plugin-webpack';
+import { FusesPlugin } from '@electron-forge/plugin-fuses';
+import { FuseV1Options, FuseVersion } from '@electron/fuses';
+
+import { mainConfig } from './webpack.main.config.js';
+import { rendererConfig } from './webpack.renderer.config.js';
+
+const config: ForgeConfig = {
+  packagerConfig: {
+    asar: true,
+  },
+  rebuildConfig: {},
+  makers: [
+    new MakerSquirrel({}),
+    new MakerZIP({}, ['win32']),
+  ],
+  plugins: [
+    new AutoUnpackNativesPlugin({}),
+    new WebpackPlugin({
+      mainConfig,
+      renderer: {
+        config: rendererConfig,
+        entryPoints: [
+          {
+            html: './src/desktop/renderer/candidate.html',
+            js: './src/desktop/preload.ts',
+            name: 'candidate_window',
+            preload: {
+              js: './src/desktop/preload.ts',
+            },
+          },
+          {
+            html: './src/desktop/renderer/save.html',
+            js: './src/desktop/preload.ts',
+            name: 'save_window',
+            preload: {
+              js: './src/desktop/preload.ts',
+            },
+          },
+        ],
+      },
+    }),
+    new FusesPlugin({
+      version: FuseVersion.V1,
+      [FuseV1Options.RunAsNode]: false,
+      [FuseV1Options.EnableCookieEncryption]: true,
+      [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+      [FuseV1Options.EnableNodeCliInspectArguments]: false,
+      [FuseV1Options.EnableEmbeddedAsarIntegrityValidation]: true,
+      [FuseV1Options.OnlyLoadAppFromAsar]: true,
+    }),
+  ],
+};
+
+export default config;

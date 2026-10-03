@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+  <title>Select Credential — Password Vault</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      padding: 16px;
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+    h2 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      -webkit-app-region: no-drag;
+    }
+    .candidate-list {
+      list-style: none;
+      max-height: 400px;
+      overflow-y: auto;
+      -webkit-app-region: no-drag;
+    }
+    .candidate-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 12px;
+      margin-bottom: 4px;
+      background: #313244;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .candidate-item:hover, .candidate-item.selected {
+      background: #89b4fa;
+      color: #1e1e2e;
+    }
+    .candidate-item .title {
+      font-weight: 500;
+      font-size: 13px;
+    }
+    .candidate-item .username {
+      font-size: 12px;
+      opacity: 0.8;
+    }
+    .candidate-item .priority {
+      font-size: 11px;
+      opacity: 0.6;
+    }
+    .hint {
+      text-align: right;
+      font-size: 11px;
+      color: #6c7086;
+      margin-top: 8px;
+      -webkit-app-region: no-drag;
+    }
+  </style>
+</head>
+<body>
+  <h2>🔐 Select credential to autofill</h2>
+  <ul class="candidate-list" id="candidateList"></ul>
+  <div class="hint">Enter to select · Esc to cancel</div>
+
+  <script>
+    // Renderer script — uses window.vault preload API
+    let selectedIndex = 0;
+    let candidates = [];
+
+    async function init() {
+      // Get operation ID from URL params or wait for IPC
+      const params = new URLSearchParams(window.location.search);
+      const opId = params.get('operationId');
+      if (!opId) return;
+
+      const result = await window.vault.getCandidates(opId);
+      if (!result.success) return;
+
+      candidates = result.data;
+      renderCandidates();
+    }
+
+    function renderCandidates() {
+      const list = document.getElementById('candidateList');
+      list.innerHTML = '';
+      candidates.forEach((c, i) => {
+        const li = document.createElement('li');
+        li.className = 'candidate-item' + (i === selectedIndex ? ' selected' : '');
+        li.innerHTML = `
+          <div>
+            <div class="title">${c.favorite ? '⭐ ' : ''}${escapeHtml(c.title)}</div>
+            <div class="username">${escapeHtml(c.username)}</div>
+          </div>
+          <div class="priority">${c.priority}</div>
+        `;
+        li.addEventListener('click', () => selectCandidate(i));
+        li.addEventListener('dblclick', () => confirmSelection());
+        list.appendChild(li);
+      });
+    }
+
+    function selectCandidate(index) {
+      selectedIndex = index;
+      renderCandidates();
+    }
+
+    async function confirmSelection() {
+      if (candidates.length === 0) return;
+      const params = new URLSearchParams(window.location.search);
+      const opId = params.get('operationId');
+      const c = candidates[selectedIndex];
+      await window.vault.selectCandidate(opId, c.credentialId);
+      window.close();
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        const params = new URLSearchParams(window.location.search);
+        const opId = params.get('operationId');
+        if (opId) window.vault.cancelOperation(opId);
+        window.close();
+      } else if (e.key === 'Enter') {
+        confirmSelection();
+      } else if (e.key === 'ArrowDown') {
+        selectedIndex = Math.min(selectedIndex + 1, candidates.length - 1);
+        renderCandidates();
+      } else if (e.key === 'ArrowUp') {
+        selectedIndex = Math.max(selectedIndex - 1, 0);
+        renderCandidates();
+      }
+    });
+
+    init();
+  </script>
+</body>
+</html>
