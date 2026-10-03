@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import * as baselineMigration from '../../migrations/0001_plaintext_baseline.js';
+import * as baselineMigration from '../../migrations/0001_plaintext_baseline.ts';
 
 describe('Database Migration & Baseline Integrity', () => {
   it('exports valid Umzug migration interface', () => {

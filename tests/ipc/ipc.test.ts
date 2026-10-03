@@ -5,11 +5,11 @@ import type { Candidate } from '../../src/domain/types.js';
 
 describe('Desktop IPC Operation & Channel Management', () => {
   it('defines stable IPC channels matching contract', () => {
-    expect(IPC_CHANNELS.GET_CANDIDATES).toBe('vault:get-candidates');
-    expect(IPC_CHANNELS.SELECT_CANDIDATE).toBe('vault:select-candidate');
-    expect(IPC_CHANNELS.SAVE_CREDENTIAL).toBe('vault:save-credential');
-    expect(IPC_CHANNELS.CANCEL_OPERATION).toBe('vault:cancel-operation');
-    expect(IPC_CHANNELS.GET_STATUS).toBe('vault:get-status');
+    expect(IPC_CHANNELS.GET_CANDIDATES).toBe('vault:getCandidates');
+    expect(IPC_CHANNELS.SELECT_CANDIDATE).toBe('vault:selectCandidate');
+    expect(IPC_CHANNELS.SAVE_CREDENTIAL).toBe('vault:saveCredential');
+    expect(IPC_CHANNELS.CANCEL_OPERATION).toBe('vault:cancelOperation');
+    expect(IPC_CHANNELS.GET_STATUS).toBe('vault:getStatus');
   });
 
   it('creates and manages operation context securely', () => {

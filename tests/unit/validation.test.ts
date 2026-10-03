@@ -68,11 +68,11 @@ describe('Domain Validation & Normalization', () => {
     it('allows partial updates with only present fields', () => {
       const update = validateUpdateCredential({
         title: 'New Title',
-        isFavorite: true,
+        favorite: true,
       });
 
       expect(update.title).toBe('New Title');
-      expect(update.isFavorite).toBe(true);
+      expect(update.favorite).toBe(true);
       expect(update.password).toBeUndefined();
       expect(update.username).toBeUndefined();
     });

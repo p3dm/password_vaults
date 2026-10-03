@@ -1,0 +1,6 @@
+"Trường","Kiểu","Mô tả"
+"id","UUID (PK)",""
+"vault_item_id","UUID (FK)",""
+"password_encrypted","BLOB","Mật khẩu cũ, vẫn mã hóa"
+"password_nonce","BLOB",""
+"changed_at","TIMESTAMP",""

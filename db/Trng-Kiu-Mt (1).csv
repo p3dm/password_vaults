@@ -1,0 +1,6 @@
+"Trường","Kiểu","Mô tả"
+"id","UUID (PK)",""
+"vault_item_id","UUID (FK)","Liên kết tới vault_items"
+"match_type","ENUM","domain, window_title_regex, android_package, resource_id_hint"
+"match_value","TEXT","Giá trị để agent so khớp, VD regex title hoặc resource-id của EditText"
+"field_role","ENUM","username, password, otp — map entry field vào đúng ô UI"

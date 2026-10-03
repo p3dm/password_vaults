@@ -121,6 +121,7 @@ export interface UpdateCredentialInput {
   platformType?: PlatformType;
   platformIdentifier?: string | null;
   username?: string;
+  password?: string;
   totpSecret?: string | null;
   notes?: string | null;
   url?: string | null;

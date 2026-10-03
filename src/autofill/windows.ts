@@ -63,17 +63,20 @@ export class WindowsAutofillAdapter implements AutofillAdapter {
     let clipboardApi: any;
     try {
       const electron = await import('electron');
-      clipboardApi = electron.clipboard;
+      clipboardApi = electron?.clipboard;
     } catch {
-      // In headless/test environment
+      clipboardApi = null;
+    }
+
+    if (!clipboardApi || typeof clipboardApi.writeText !== 'function') {
+      let _val = '';
       clipboardApi = {
-        _val: '',
-        writeText(t: string) { this._val = t; },
-        readText() { return this._val; }
+        writeText: (t: string) => { _val = t; },
+        readText: async () => _val,
       };
     }
 
-    const originalClipboard = clipboardApi.readText();
+    const originalClipboard = await clipboardApi.readText();
     let currentWrittenValue = '';
 
     try {
@@ -92,10 +95,10 @@ export class WindowsAutofillAdapter implements AutofillAdapter {
       await this.sleep(this.options.pasteDelayMs);
     } finally {
       // Schedule clipboard cleanup
-      setTimeout(() => {
+      setTimeout(async () => {
         try {
           // Only clear if user hasn't copied something else in the meantime
-          const currentText = clipboardApi.readText();
+          const currentText = await clipboardApi.readText();
           if (currentText === currentWrittenValue || currentText === username || currentText === password) {
             clipboardApi.writeText(originalClipboard);
           }

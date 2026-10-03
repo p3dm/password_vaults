@@ -113,6 +113,10 @@ const updateCredentialSchema = z.object({
     .refine((v) => v.length > 0, { message: 'username: not valid' })
     .refine((v) => v.length <= 512, { message: 'username: too long' })
     .optional(),
+  password: z
+    .string()
+    .refine((v) => v.length > 0, { message: 'password: not valid' })
+    .optional(),
   totpSecret: z.string().transform((v) => v.trim()).nullable().optional(),
   notes: z.string().transform((v) => v.trim()).nullable().optional(),
   url: z
